@@ -24,26 +24,26 @@ and internal switch persist. Only test VMs should be rebuilt.
 ```
 ┌────────────────────────────────────────────────────────────────┐
 │ Mac (Claude Code runs here)                                    │
-│  ~/.ssh key for nmadmin@__HYPERV_HOST__                        │
+│  ~/.ssh key for nmadmin@server                                 │
 │  /Volumes/ISO  →  D:\ISO\ on host  (for file transfer)         │
-│                                                                 │
-│  ssh nmadmin@__HYPERV_HOST__    (lands in PowerShell 7.6)      │
-│  ssh -J nmadmin@__HYPERV_HOST__ root@172.22.0.X   (to VMs)     │
+│                                                                │
+│  ssh nmadmin@server   (lands in PowerShell 7.6)                │
+│  ssh -J nmadmin@server root@172.22.0.X   (to VMs)              │
 └────────────────────────────────────────────────────────────────┘
          │
          ▼
 ┌────────────────────────────────────────────────────────────────┐
-│ Hyper-V Host: __HYPERV_HOST__   (shell: PowerShell 7.6)        │
+│ Hyper-V Host: server   (shell: PowerShell 7.6)                 │
 │   User: nmadmin  (admin; key-based SSH, no password)           │
 │   D:\ISO\      — ISO library (= /Volumes/ISO on Mac)           │
 │   D:\Lab\      — VM files                                      │
-│                                                                 │
+│                                                                │
 │   Pre-loaded modules: Hyper-V, ActiveDirectory                 │
-│                                                                 │
+│                                                                │
 │   ┌──────────────────────────────────────────────────────┐     │
 │   │  Internal Switch: "Lab-Internal"  (172.22.0.0/24)    │     │
 │   │  Host vNIC: 172.22.0.1                               │     │
-│   │                                                       │     │
+│   │                                                      │     │
 │   │  ┌────────────────┐    ┌────────────────┐            │     │
 │   │  │ WS2025-DC1     │    │ samba-dc1      │            │     │
 │   │  │ 172.22.0.10    │    │ 172.22.0.20    │            │     │
@@ -73,8 +73,8 @@ host. For package updates, see "Getting packages into VMs" below.
 ### Hyper-V Host
 
 ```
-Hostname/IP:    __HYPERV_HOST__
-SSH:            ssh nmadmin@__HYPERV_HOST__   (key-based, no password)
+Hostname/IP:    server
+SSH:            ssh nmadmin@server   (key-based, no password)
 Shell:          PowerShell 7.6
 Admin rights:   nmadmin is full admin
 ISO share:      /Volumes/ISO (Mac) ↔ D:\ISO\ (host)
@@ -102,16 +102,16 @@ Debian root password:                       (set during manual install)
 
 ```bash
 # Single command
-ssh nmadmin@__HYPERV_HOST__ 'Get-VM | Format-Table Name,State,Uptime'
+ssh nmadmin@server 'Get-VM | Format-Table Name,State,Uptime'
 
 # Multi-line via heredoc (note: ssh invokes pwsh automatically since it's the login shell)
-ssh nmadmin@__HYPERV_HOST__ << 'EOF'
+ssh nmadmin@server << 'EOF'
 Get-VMSwitch
 Get-VM
 EOF
 
 # Run a PowerShell script file on the host
-ssh nmadmin@__HYPERV_HOST__ 'pwsh -File D:\Lab\scripts\New-WS2025Lab.ps1'
+ssh nmadmin@server 'pwsh -File D:\Lab\scripts\New-WS2025Lab.ps1'
 ```
 
 ### Running commands on Windows VMs (PowerShell Direct)
@@ -121,7 +121,7 @@ the VM is booted past OOBE. Always wrap commands so they run on the **host**,
 which then invokes into the VM:
 
 ```bash
-ssh nmadmin@__HYPERV_HOST__ << 'EOF'
+ssh nmadmin@server << 'EOF'
 $cred = New-Object PSCredential('LAB\Administrator',
     (ConvertTo-SecureString 'P@ssword123456!' -AsPlainText -Force))
 Invoke-Command -VMName 'WS2025-DC1' -Credential $cred -ScriptBlock {
@@ -135,14 +135,14 @@ EOF
 SSH with the host as jump host:
 
 ```bash
-ssh -J nmadmin@__HYPERV_HOST__ root@172.22.0.20
+ssh -J nmadmin@server root@172.22.0.20
 ```
 
 Or set up `~/.ssh/config` on the Mac for convenience:
 
 ```
 Host hv-host
-    HostName __HYPERV_HOST__
+    HostName server
     User nmadmin
 
 Host samba-dc1
@@ -163,19 +163,19 @@ Host samba-dc2
 cp prepare-image.sh /Volumes/ISO/
 
 # Host → Linux VM (PowerShell Direct Copy-VMFile works on Debian with hv_utils)
-ssh nmadmin@__HYPERV_HOST__ << 'EOF'
+ssh nmadmin@server << 'EOF'
 Copy-VMFile -Name 'samba-dc1' -SourcePath 'D:\ISO\prepare-image.sh' `
     -DestinationPath '/root/prepare-image.sh' -FileSource Host -CreateFullPath -Force
 EOF
 
 # Host → Windows VM
-ssh nmadmin@__HYPERV_HOST__ << 'EOF'
+ssh nmadmin@server << 'EOF'
 Copy-VMFile -Name 'WS2025-DC1' -SourcePath 'D:\ISO\WS2025-2602-Security-Baseline.zip' `
     -DestinationPath 'C:\Setup\WS2025-2602-Security-Baseline.zip' -FileSource Host -CreateFullPath -Force
 EOF
 
 # Mac → Linux VM (direct via jump)
-scp -J nmadmin@__HYPERV_HOST__ prepare-image.sh root@172.22.0.20:/root/
+scp -J nmadmin@server prepare-image.sh root@172.22.0.20:/root/
 ```
 
 ### Getting packages into VMs (no NAT on internal switch)
@@ -220,7 +220,7 @@ These exist once and stay up. If missing, rebuild via scripts in `lab/`.
 ### Health check (run at start of every session)
 
 ```bash
-ssh nmadmin@__HYPERV_HOST__ << 'EOF'
+ssh nmadmin@server << 'EOF'
 $ErrorActionPreference = 'SilentlyContinue'
 
 # Switch
@@ -273,10 +273,10 @@ cp -r lab/ /Volumes/ISO/lab-scripts/
 Then run on the host:
 ```bash
 # 1. Create switch + WS2025 DC VM (~15 min; VM builds itself)
-ssh nmadmin@__HYPERV_HOST__ 'pwsh -File D:\ISO\lab-scripts\New-WS2025Lab.ps1'
+ssh nmadmin@server 'pwsh -File D:\ISO\lab-scripts\New-WS2025Lab.ps1'
 
 # 2. Wait for DC to finish setup (check setup-complete.marker)
-ssh nmadmin@__HYPERV_HOST__ << 'EOF'
+ssh nmadmin@server << 'EOF'
 $cred = New-Object PSCredential('LAB\Administrator',
     (ConvertTo-SecureString 'P@ssword123456!' -AsPlainText -Force))
 do {
@@ -293,7 +293,7 @@ do {
 EOF
 
 # 3. Apply security baseline
-ssh nmadmin@__HYPERV_HOST__ 'pwsh -File D:\ISO\lab-scripts\Apply-SecurityBaseline.ps1'
+ssh nmadmin@server 'pwsh -File D:\ISO\lab-scripts\Apply-SecurityBaseline.ps1'
 ```
 
 ### lab/ script summary
@@ -316,7 +316,7 @@ Treat Debian VMs as disposable. The workflow:
 
 1. Create VM:
    ```bash
-   ssh nmadmin@__HYPERV_HOST__ 'pwsh -File D:\ISO\lab-scripts\New-SambaTestVM.ps1 -VMName samba-dc1 -Start'
+   ssh nmadmin@server 'pwsh -File D:\ISO\lab-scripts\New-SambaTestVM.ps1 -VMName samba-dc1 -Start'
    ```
 
 2. Install Debian manually via `vmconnect localhost samba-dc1`:
@@ -330,27 +330,27 @@ Treat Debian VMs as disposable. The workflow:
 
 3. Remove the install DVD:
    ```bash
-   ssh nmadmin@__HYPERV_HOST__ 'Set-VMDvdDrive -VMName samba-dc1 -Path $null'
+   ssh nmadmin@server 'Set-VMDvdDrive -VMName samba-dc1 -Path $null'
    ```
 
 4. Temporarily attach external NIC for package downloads:
    ```bash
-   ssh nmadmin@__HYPERV_HOST__ "Add-VMNetworkAdapter -VMName samba-dc1 -SwitchName 'Default Switch'"
-   ssh -J nmadmin@__HYPERV_HOST__ root@172.22.0.20 'dhclient eth1 || ip link set eth1 up && dhclient eth1'
+   ssh nmadmin@server "Add-VMNetworkAdapter -VMName samba-dc1 -SwitchName 'Default Switch'"
+   ssh -J nmadmin@server root@172.22.0.20 'dhclient eth1 || ip link set eth1 up && dhclient eth1'
    ```
 
 5. Copy scripts and run prep:
    ```bash
-   scp -J nmadmin@__HYPERV_HOST__ prepare-image.sh samba-sconfig.sh \
+   scp -J nmadmin@server prepare-image.sh samba-sconfig.sh \
        root@172.22.0.20:/root/
-   ssh -J nmadmin@__HYPERV_HOST__ root@172.22.0.20 'bash /root/prepare-image.sh'
+   ssh -J nmadmin@server root@172.22.0.20 'bash /root/prepare-image.sh'
    ```
 
 6. Remove external NIC, shutdown, checkpoint:
    ```bash
-   ssh -J nmadmin@__HYPERV_HOST__ root@172.22.0.20 'shutdown -h now' || true
+   ssh -J nmadmin@server root@172.22.0.20 'shutdown -h now' || true
    sleep 10
-   ssh nmadmin@__HYPERV_HOST__ << 'EOF'
+   ssh nmadmin@server << 'EOF'
    Remove-VMNetworkAdapter -VMName samba-dc1 -Name 'Network Adapter 2' -ErrorAction SilentlyContinue
    Checkpoint-VM -Name samba-dc1 -SnapshotName 'golden-image'
 EOF
@@ -359,7 +359,7 @@ EOF
 ### Per test cycle (fast)
 
 ```bash
-ssh nmadmin@__HYPERV_HOST__ << 'EOF'
+ssh nmadmin@server << 'EOF'
 Stop-VM -Name samba-dc1 -Force -ErrorAction SilentlyContinue
 Restore-VMCheckpoint -Name golden-image -VMName samba-dc1 -Confirm:$false
 Start-VM -Name samba-dc1
@@ -367,14 +367,14 @@ EOF
 sleep 30  # wait for boot
 
 # Run the test scenario
-ssh -J nmadmin@__HYPERV_HOST__ root@172.22.0.20 'samba-sconfig ...'
+ssh -J nmadmin@server root@172.22.0.20 'samba-sconfig ...'
 ```
 
 ### Cleanup at end of all testing
 
 Delete test VMs **only** (never WS2025-DC1):
 ```bash
-ssh nmadmin@__HYPERV_HOST__ << 'EOF'
+ssh nmadmin@server << 'EOF'
 Stop-VM -Name samba-dc1 -Force -ErrorAction SilentlyContinue
 Remove-VM -Name samba-dc1 -Force
 Remove-Item D:\Lab\samba-dc1 -Recurse -Force
@@ -391,7 +391,7 @@ EOF
 prep'd image.
 
 ```bash
-ssh -J nmadmin@__HYPERV_HOST__ root@172.22.0.20 << 'EOF'
+ssh -J nmadmin@server root@172.22.0.20 << 'EOF'
 rm -f /etc/samba/smb.conf
 systemctl stop samba-ad-dc 2>/dev/null
 
@@ -436,7 +436,7 @@ EOF
 domain that has the security baseline applied.
 
 ```bash
-ssh -J nmadmin@__HYPERV_HOST__ root@172.22.0.20 << 'EOF'
+ssh -J nmadmin@server root@172.22.0.20 << 'EOF'
 # Pre-flight checks
 ping -c 3 172.22.0.10 || exit 1
 dig @172.22.0.10 lab.test +short
@@ -487,7 +487,7 @@ samba-tool drs showrepl
 EOF
 
 # Cross-check from WS2025 side
-ssh nmadmin@__HYPERV_HOST__ << 'EOF'
+ssh nmadmin@server << 'EOF'
 $cred = New-Object PSCredential('LAB\Administrator',
     (ConvertTo-SecureString 'P@ssword123456!' -AsPlainText -Force))
 Invoke-Command -VMName WS2025-DC1 -Credential $cred -ScriptBlock {
@@ -519,7 +519,7 @@ Save as `run-tests.sh` in the repo root. Runs all scenarios, saves logs.
 ```bash
 #!/usr/bin/env bash
 set -u
-HYPERV_HOST='__HYPERV_HOST__'
+HYPERV_HOST='server'
 VM_NAME='samba-dc1'
 VM_IP='172.22.0.20'
 RESULTS_DIR='test-results'
@@ -663,7 +663,7 @@ wbinfo -t
 smbclient //ws2025-dc1.lab.test/sysvol -U 'LAB\Administrator'
 
 # WS2025 via PSDirect
-ssh nmadmin@__HYPERV_HOST__ << 'EOF'
+ssh nmadmin@server << 'EOF'
 $cred = New-Object PSCredential('LAB\Administrator',
     (ConvertTo-SecureString 'P@ssword123456!' -AsPlainText -Force))
 Invoke-Command -VMName WS2025-DC1 -Credential $cred -ScriptBlock {
@@ -680,7 +680,7 @@ EOF
 ## Script Modification Loop
 
 1. Edit `prepare-image.sh` or `samba-sconfig.sh` in repo
-2. `scp -J nmadmin@__HYPERV_HOST__ samba-sconfig.sh root@172.22.0.20:/usr/local/sbin/samba-sconfig`
+2. `scp -J nmadmin@server samba-sconfig.sh root@172.22.0.20:/usr/local/sbin/samba-sconfig`
 3. If `prepare-image.sh` changed → need fresh install (re-run initial setup)
 4. If `samba-sconfig.sh` only → revert checkpoint, replace file, re-test
 
