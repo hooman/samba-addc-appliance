@@ -1,0 +1,1096 @@
+#!/usr/bin/env bash
+#===============================================================================
+# samba-sconfig — Samba AD DC Appliance Configuration Tool
+#
+# Whiptail TUI modeled after Windows Server Core's sconfig.
+# Handles deployment configuration and management of a Samba AD DC
+# on Debian 13 (Trixie).
+#
+# Usage: sudo samba-sconfig
+#===============================================================================
+set -uo pipefail
+
+readonly VERSION="1.1.0"
+readonly SCRIPT_NAME="samba-sconfig"
+readonly WT_HEIGHT=22
+readonly WT_WIDTH=76
+readonly WT_MENU_HEIGHT=14
+
+#===============================================================================
+# UTILITIES
+#===============================================================================
+die()  { whiptail --msgbox "FATAL: $*" 10 60; exit 1; }
+info() { whiptail --msgbox "$*" 12 64; }
+yesno(){ whiptail --yesno "$*" 10 60; }
+
+check_root() {
+    if [[ $EUID -ne 0 ]]; then
+        echo "ERROR: Run as root (sudo samba-sconfig)." >&2
+        exit 1
+    fi
+}
+
+get_hostname()  { hostname -s 2>/dev/null || echo "(not set)"; }
+get_fqdn()      { hostname -f 2>/dev/null || echo "(not set)"; }
+get_domain()    { dnsdomainname 2>/dev/null || echo "(not set)"; }
+get_ip()        { ip -4 addr show scope global | grep -oP '(?<=inet\s)\d+[.\d/]+' | head -1 || echo "(not set)"; }
+get_gateway()   { ip route show default | awk '/default/{print $3}' | head -1 || echo "(not set)"; }
+get_iface()     { ip -4 route show default 2>/dev/null | awk '{print $5}' | head -1 || \
+                  ip link show | awk -F: '/^[0-9]+:/{if($2!~"lo") print $2}' | tr -d ' ' | head -1; }
+
+is_provisioned() { [[ -f /etc/samba/smb.conf ]] && grep -q 'server role.*active directory' /etc/samba/smb.conf 2>/dev/null; }
+is_addc_running() { systemctl is-active samba-ad-dc &>/dev/null; }
+
+get_realm() {
+    is_provisioned && grep -oP '(?<=realm = ).*' /etc/samba/smb.conf 2>/dev/null | head -1 || echo "(not provisioned)"
+}
+
+get_netbios() {
+    is_provisioned && grep -oP '(?<=workgroup = ).*' /etc/samba/smb.conf 2>/dev/null | head -1 || echo "(not provisioned)"
+}
+
+get_dc_role() {
+    if ! is_provisioned; then echo "Not provisioned"; return; fi
+    if is_addc_running; then echo "AD DC (Running)"; else echo "AD DC (Stopped)"; fi
+}
+
+get_update_policy() {
+    if [[ ! -f /etc/apt/apt.conf.d/20auto-upgrades ]]; then
+        echo "Not configured"
+        return
+    fi
+    local update_list unattended
+    update_list=$(grep -oP '(?<=Update-Package-Lists ").*(?=")' /etc/apt/apt.conf.d/20auto-upgrades 2>/dev/null)
+    unattended=$(grep -oP '(?<=Unattended-Upgrade ").*(?=")' /etc/apt/apt.conf.d/20auto-upgrades 2>/dev/null)
+    if [[ "$unattended" == "1" && "$update_list" == "1" ]]; then
+        if grep -q 'origin=Debian,codename=.*-security' /etc/apt/apt.conf.d/50unattended-upgrades 2>/dev/null && \
+           ! grep -q '^\s*"origin=Debian,codename=\${distro_codename}' /etc/apt/apt.conf.d/50unattended-upgrades 2>/dev/null; then
+            echo "Security only"
+        else
+            echo "Full automatic"
+        fi
+    else
+        echo "Manual"
+    fi
+}
+
+#===============================================================================
+# MAIN MENU
+#===============================================================================
+main_menu() {
+    while true; do
+        local hostname fqdn ip_addr dc_role realm_str
+        hostname=$(get_hostname)
+        fqdn=$(get_fqdn)
+        ip_addr=$(get_ip)
+        dc_role=$(get_dc_role)
+        realm_str=$(get_realm)
+
+        local choice
+        choice=$(whiptail --title "Samba AD DC Configuration [$hostname] v${VERSION}" \
+            --menu "\n  Host: $fqdn  |  IP: $ip_addr\n  Role: $dc_role  |  Realm: $realm_str\n" \
+            $WT_HEIGHT $WT_WIDTH $WT_MENU_HEIGHT \
+            "1" "System Configuration" \
+            "2" "Domain Operations" \
+            "3" "Post-Domain Setup" \
+            "4" "SYSVOL Replication" \
+            "5" "Security Hardening" \
+            "6" "Diagnostics & Sanity Check" \
+            "7" "Service Management" \
+            "8" "Reboot / Shutdown" \
+            "Q" "Exit" \
+            3>&1 1>&2 2>&3) || return
+
+        case "$choice" in
+            1) menu_system_config ;;
+            2) menu_domain_ops ;;
+            3) menu_post_domain ;;
+            4) menu_sysvol_sync ;;
+            5) menu_hardening ;;
+            6) menu_diagnostics ;;
+            7) menu_services ;;
+            8) menu_power ;;
+            Q|q) clear; exit 0 ;;
+        esac
+    done
+}
+
+#===============================================================================
+# 1. SYSTEM CONFIGURATION
+#===============================================================================
+menu_system_config() {
+    while true; do
+        local update_policy
+        update_policy=$(get_update_policy)
+        local choice
+        choice=$(whiptail --title "System Configuration" \
+            --menu "Hostname: $(get_fqdn)\nIP: $(get_ip) | GW: $(get_gateway)\nUpdates: $update_policy" \
+            $WT_HEIGHT $WT_WIDTH $WT_MENU_HEIGHT \
+            "1" "Set Hostname" \
+            "2" "Configure Network (Static IP)" \
+            "3" "Set Timezone" \
+            "4" "Configure System Updates" \
+            "5" "Run Updates Now" \
+            "6" "Show System Info" \
+            "B" "Back to Main Menu" \
+            3>&1 1>&2 2>&3) || return
+
+        case "$choice" in
+            1) config_hostname ;;
+            2) config_network ;;
+            3) config_timezone ;;
+            4) config_updates ;;
+            5) run_updates_now ;;
+            6) show_system_info ;;
+            B|b) return ;;
+        esac
+    done
+}
+
+config_hostname() {
+    local current_fqdn
+    current_fqdn=$(get_fqdn)
+
+    local new_hostname
+    new_hostname=$(whiptail --inputbox \
+        "Enter the FQDN for this server.\n\nRules:\n- Short name max 15 characters (AD limit)\n- Use .lan or a subdomain you own\n- NEVER use .local (mDNS conflict)\n\nCurrent: $current_fqdn" \
+        14 64 "$current_fqdn" \
+        3>&1 1>&2 2>&3) || return
+
+    [[ -z "$new_hostname" ]] && return
+
+    if [[ "$new_hostname" != *.* ]]; then
+        info "ERROR: Must be a FQDN (e.g., dc1.home.lan)."; return
+    fi
+    if [[ "$new_hostname" == *.local ]]; then
+        info "ERROR: .local conflicts with mDNS/Bonjour."; return
+    fi
+
+    local short_name="${new_hostname%%.*}"
+    if [[ ${#short_name} -gt 15 ]]; then
+        info "ERROR: Short name '$short_name' exceeds 15 chars."; return
+    fi
+
+    local ip_addr
+    ip_addr=$(get_ip | cut -d/ -f1)
+
+    hostnamectl set-hostname "$new_hostname"
+    echo "$new_hostname" > /etc/hostname
+
+    # Clean /etc/hosts and add new entry
+    sed -i "/\s${current_fqdn}\b/d" /etc/hosts 2>/dev/null || true
+    echo "${ip_addr}  ${new_hostname}  ${short_name}" >> /etc/hosts
+
+    info "Hostname set to: $new_hostname\nShort: $short_name\n\nReboot recommended."
+}
+
+config_network() {
+    local iface
+    iface=$(get_iface)
+    [[ -z "$iface" ]] && { info "ERROR: No network interface detected."; return; }
+
+    local current_ip current_mask current_gw
+    current_ip=$(get_ip | cut -d/ -f1)
+    current_mask=$(get_ip | cut -d/ -f2)
+    current_gw=$(get_gateway)
+
+    local new_ip new_mask new_gw new_dns
+    new_ip=$(whiptail --inputbox "Interface: $iface\n\nStatic IP address:" \
+        10 60 "$current_ip" 3>&1 1>&2 2>&3) || return
+    new_mask=$(whiptail --inputbox "Subnet prefix length (e.g., 24):" \
+        10 60 "${current_mask:-24}" 3>&1 1>&2 2>&3) || return
+    new_gw=$(whiptail --inputbox "Default gateway:" \
+        10 60 "$current_gw" 3>&1 1>&2 2>&3) || return
+    new_dns=$(whiptail --inputbox "Upstream DNS (pre-domain; post-domain uses 127.0.0.1):" \
+        10 64 "1.1.1.1" 3>&1 1>&2 2>&3) || return
+
+    yesno "Apply?\n\nInterface: $iface\nIP: $new_ip/$new_mask\nGateway: $new_gw\nDNS: $new_dns" || return
+
+    cat > /etc/network/interfaces << NETEOF
+auto lo
+iface lo inet loopback
+
+auto ${iface}
+iface ${iface} inet static
+    address ${new_ip}/${new_mask}
+    gateway ${new_gw}
+NETEOF
+
+    cat > /etc/resolv.conf << DNSEOF
+nameserver ${new_dns}
+DNSEOF
+
+    local fqdn short
+    fqdn=$(get_fqdn); short=$(get_hostname)
+    sed -i "/\s${fqdn}\b/d" /etc/hosts 2>/dev/null || true
+    echo "${new_ip}  ${fqdn}  ${short}" >> /etc/hosts
+
+    info "Network written. Reboot to apply."
+}
+
+config_timezone() { dpkg-reconfigure tzdata; }
+
+config_updates() {
+    local choice
+    choice=$(whiptail --title "System Update Policy" \
+        --menu "Current policy: $(get_update_policy)\n\nSelect how this server should handle system updates." \
+        $WT_HEIGHT $WT_WIDTH $WT_MENU_HEIGHT \
+        "1" "Manual — no automatic updates (I will run updates myself)" \
+        "2" "Security Only — auto-install critical security patches" \
+        "3" "Full Automatic — auto-install all stable updates" \
+        "B" "Back" \
+        3>&1 1>&2 2>&3) || return
+
+    case "$choice" in
+        1) set_update_policy_manual ;;
+        2) set_update_policy_security ;;
+        3) set_update_policy_full ;;
+        B|b) return ;;
+    esac
+}
+
+set_update_policy_manual() {
+    cat > /etc/apt/apt.conf.d/20auto-upgrades << 'EOF'
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "0";
+APT::Periodic::Download-Upgradeable-Packages "0";
+APT::Periodic::AutocleanInterval "7";
+EOF
+    info "Update policy: MANUAL\n\nPackage lists refresh daily, but nothing installs automatically.\nRun updates manually from this menu or via apt."
+}
+
+set_update_policy_security() {
+    cat > /etc/apt/apt.conf.d/20auto-upgrades << 'EOF'
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+APT::Periodic::Download-Upgradeable-Packages "1";
+APT::Periodic::AutocleanInterval "7";
+EOF
+
+    # Configure unattended-upgrades for security only
+    cat > /etc/apt/apt.conf.d/50unattended-upgrades << 'EOF'
+Unattended-Upgrade::Allowed-Origins {
+    "origin=Debian,codename=${distro_codename}-security,label=Debian-Security";
+};
+
+Unattended-Upgrade::Package-Blacklist {
+    // Prevent Samba from being upgraded unattended (could break AD)
+    "samba";
+    "samba-ad-dc";
+    "winbind";
+    "libnss-winbind";
+    "libpam-winbind";
+    "krb5-user";
+};
+
+Unattended-Upgrade::AutoFixInterruptedDpkg "true";
+Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
+Unattended-Upgrade::Remove-Unused-Dependencies "true";
+
+// Email notification (configure if needed)
+//Unattended-Upgrade::Mail "root";
+//Unattended-Upgrade::MailReport "on-change";
+
+// Auto-reboot if needed (disabled by default for a DC)
+Unattended-Upgrade::Automatic-Reboot "false";
+EOF
+
+    systemctl enable unattended-upgrades 2>/dev/null || true
+
+    info "Update policy: SECURITY ONLY\n\nOnly Debian security patches auto-install.\nSamba/Kerberos/Winbind packages are blacklisted from auto-update\n(upgrade those manually to avoid breaking AD).\n\nAuto-reboot is DISABLED."
+}
+
+set_update_policy_full() {
+    cat > /etc/apt/apt.conf.d/20auto-upgrades << 'EOF'
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+APT::Periodic::Download-Upgradeable-Packages "1";
+APT::Periodic::AutocleanInterval "7";
+EOF
+
+    cat > /etc/apt/apt.conf.d/50unattended-upgrades << 'EOF'
+Unattended-Upgrade::Allowed-Origins {
+    "origin=Debian,codename=${distro_codename},label=Debian";
+    "origin=Debian,codename=${distro_codename}-security,label=Debian-Security";
+    "origin=Debian,codename=${distro_codename}-updates,label=Debian";
+};
+
+Unattended-Upgrade::Package-Blacklist {
+    "samba";
+    "samba-ad-dc";
+    "winbind";
+    "libnss-winbind";
+    "libpam-winbind";
+    "krb5-user";
+};
+
+Unattended-Upgrade::AutoFixInterruptedDpkg "true";
+Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
+Unattended-Upgrade::Remove-Unused-Dependencies "true";
+Unattended-Upgrade::Automatic-Reboot "false";
+EOF
+
+    systemctl enable unattended-upgrades 2>/dev/null || true
+
+    info "Update policy: FULL AUTOMATIC\n\nAll Debian stable + security updates auto-install.\nSamba/Kerberos/Winbind are still blacklisted.\nAuto-reboot is DISABLED."
+}
+
+run_updates_now() {
+    if yesno "Run apt update && apt upgrade now?\n\nThis will update package lists and install available upgrades interactively."; then
+        clear
+        echo "=== Running system updates ==="
+        echo ""
+        apt-get update
+        echo ""
+        apt-get upgrade
+        echo ""
+        echo "Press Enter to return to samba-sconfig..."
+        read -r
+    fi
+}
+
+show_system_info() {
+    local info_text
+    info_text=$(cat << EOF
+Hostname (FQDN): $(get_fqdn)
+Hostname (short): $(get_hostname)
+IP Address:       $(get_ip)
+Gateway:          $(get_gateway)
+Interface:        $(get_iface)
+DNS Domain:       $(get_domain)
+
+Kernel:           $(uname -r)
+Debian:           $(cat /etc/debian_version 2>/dev/null)
+Virtualization:   $(systemd-detect-virt 2>/dev/null || echo "unknown")
+Uptime:           $(uptime -p 2>/dev/null)
+
+Samba:            $(samba --version 2>/dev/null || echo "not installed")
+PowerShell:       $(pwsh --version 2>/dev/null || echo "not installed")
+DC Role:          $(get_dc_role)
+Realm:            $(get_realm)
+NetBIOS:          $(get_netbios)
+Update Policy:    $(get_update_policy)
+EOF
+)
+    whiptail --title "System Information" --scrolltext --msgbox "$info_text" 24 70
+}
+
+#===============================================================================
+# 2. DOMAIN OPERATIONS
+#===============================================================================
+menu_domain_ops() {
+    if is_provisioned; then
+        info "Already provisioned.\n\nRealm: $(get_realm)\nNetBIOS: $(get_netbios)\n\nTo re-provision, remove /etc/samba/smb.conf and\n/var/lib/samba/private/ contents first."
+        return
+    fi
+
+    local choice
+    choice=$(whiptail --title "Domain Operations" \
+        --menu "Select DC role. WARNING: These operations are destructive." \
+        $WT_HEIGHT $WT_WIDTH $WT_MENU_HEIGHT \
+        "1" "Create New Forest & Domain" \
+        "2" "Join as Additional DC (Backup)" \
+        "3" "Join as Read-Only DC (RODC)" \
+        "B" "Back" \
+        3>&1 1>&2 2>&3) || return
+
+    case "$choice" in
+        1) domain_provision_new ;;
+        2) domain_join_dc ;;
+        3) domain_join_rodc ;;
+        B|b) return ;;
+    esac
+}
+
+collect_domain_info() {
+    DC_REALM=$(whiptail --inputbox \
+        "AD Realm (UPPERCASE DNS domain name).\n\nExamples: HOME.LAN, CORP.CONTOSO.COM\nDo NOT use .local" \
+        12 64 "" 3>&1 1>&2 2>&3) || return 1
+    [[ -z "$DC_REALM" ]] && return 1
+    DC_REALM="${DC_REALM^^}"
+    [[ "$DC_REALM" == *.LOCAL ]] && { info ".LOCAL conflicts with mDNS."; return 1; }
+
+    local default_netbios="${DC_REALM%%.*}"
+    DC_NETBIOS=$(whiptail --inputbox "NetBIOS (short) domain name. Max 15 chars, no dots." \
+        10 64 "$default_netbios" 3>&1 1>&2 2>&3) || return 1
+    DC_NETBIOS="${DC_NETBIOS^^}"
+
+    DC_DNS_FORWARDER=$(whiptail --inputbox "DNS forwarder (upstream DNS for external names):" \
+        10 64 "1.1.1.1" 3>&1 1>&2 2>&3) || return 1
+
+    DC_ADMIN_PASS=$(whiptail --passwordbox \
+        "Administrator password (12+ chars, mixed case, numbers, special):" \
+        10 64 3>&1 1>&2 2>&3) || return 1
+    [[ ${#DC_ADMIN_PASS} -lt 8 ]] && { info "Password too short (min 8 chars)."; return 1; }
+
+    local pass_confirm
+    pass_confirm=$(whiptail --passwordbox "Confirm password:" 10 64 3>&1 1>&2 2>&3) || return 1
+    [[ "$DC_ADMIN_PASS" != "$pass_confirm" ]] && { info "Passwords don't match."; return 1; }
+
+    return 0
+}
+
+write_krb5_conf() {
+    cat > /etc/krb5.conf << KRBEOF
+[libdefaults]
+  default_realm = ${1}
+  dns_lookup_kdc = true
+  dns_lookup_realm = false
+KRBEOF
+}
+
+apply_hardening_to_smb_conf() {
+    local smb="/etc/samba/smb.conf"
+    [[ -f "$smb" ]] || return
+    grep -q '# --- sconfig hardening ---' "$smb" 2>/dev/null && return
+
+    cat >> "$smb" << 'HARDENEOF'
+
+# --- sconfig hardening ---
+        server signing = mandatory
+        client signing = mandatory
+        server min protocol = SMB3_00
+        client min protocol = SMB3_00
+        ldap server require strong auth = yes
+        kerberos encryption types = aes256-cts-hmac-sha1-96 aes128-cts-hmac-sha1-96
+        ntlm auth = mschapv2-and-ntlmv2-only
+        tls enabled = yes
+        tls priority = NORMAL:-VERS-ALL:+VERS-TLS1.2:+VERS-TLS1.3
+        log level = 1 auth_audit:3 auth_json_audit:3
+        allow dns updates = secure only
+HARDENEOF
+}
+
+post_provision_setup() {
+    local realm="$1" dns_fwd="$2"
+    local realm_lower="${realm,,}"
+
+    rm -f /var/lib/samba/private/krb5.conf
+    ln -s /etc/krb5.conf /var/lib/samba/private/krb5.conf
+
+    if ! grep -q "dns forwarder" /etc/samba/smb.conf 2>/dev/null; then
+        sed -i "/\[global\]/a\\        dns forwarder = ${dns_fwd}" /etc/samba/smb.conf
+    fi
+
+    cat > /etc/resolv.conf << DNSEOF
+search ${realm_lower}
+nameserver 127.0.0.1
+DNSEOF
+
+    systemctl unmask samba-ad-dc
+    systemctl enable samba-ad-dc
+    systemctl start samba-ad-dc
+    sleep 3
+}
+
+domain_provision_new() {
+    local DC_REALM DC_NETBIOS DC_ADMIN_PASS DC_DNS_FORWARDER
+    collect_domain_info || return
+
+    yesno "Provision NEW forest?\n\nRealm: $DC_REALM\nNetBIOS: $DC_NETBIOS\nDNS: SAMBA_INTERNAL\nForwarder: $DC_DNS_FORWARDER" || return
+
+    rm -f /etc/samba/smb.conf
+    systemctl stop samba-ad-dc 2>/dev/null || true
+    write_krb5_conf "$DC_REALM"
+
+    {
+        echo "10"; echo "XXX"; echo "Provisioning AD domain..."; echo "XXX"
+        samba-tool domain provision \
+            --realm="$DC_REALM" --domain="$DC_NETBIOS" \
+            --server-role=dc --dns-backend=SAMBA_INTERNAL \
+            --adminpass="$DC_ADMIN_PASS" \
+            --option="dns forwarder = $DC_DNS_FORWARDER" 2>&1 | tail -5
+        echo "50"; echo "XXX"; echo "Applying hardening..."; echo "XXX"
+        apply_hardening_to_smb_conf
+        echo "70"; echo "XXX"; echo "Starting services..."; echo "XXX"
+        post_provision_setup "$DC_REALM" "$DC_DNS_FORWARDER"
+        echo "100"; echo "XXX"; echo "Done!"; echo "XXX"
+    } | whiptail --title "Provisioning" --gauge "Starting..." 8 60 0
+
+    if is_addc_running; then
+        info "Domain provisioned!\n\nRealm: $DC_REALM | NetBIOS: $DC_NETBIOS\n\nNext: Run Diagnostics (6), Post-Domain Setup (3), Hardening (5)"
+    else
+        info "WARNING: samba-ad-dc not running.\n\nCheck: journalctl -u samba-ad-dc -n 50"
+    fi
+}
+
+domain_join_dc() {
+    local DC_REALM DC_NETBIOS DC_ADMIN_PASS DC_DNS_FORWARDER
+    collect_domain_info || return
+
+    local existing_dc
+    existing_dc=$(whiptail --inputbox "FQDN or IP of existing DC to replicate from:" \
+        10 64 "" 3>&1 1>&2 2>&3) || return
+
+    yesno "Join as ADDITIONAL DC?\n\nRealm: $DC_REALM\nSource DC: $existing_dc" || return
+
+    rm -f /etc/samba/smb.conf
+    systemctl stop samba-ad-dc 2>/dev/null || true
+    write_krb5_conf "$DC_REALM"
+    echo -e "search ${DC_REALM,,}\nnameserver ${existing_dc}" > /etc/resolv.conf
+
+    whiptail --infobox "Joining domain... This may take several minutes." 8 60
+
+    if samba-tool domain join "$DC_REALM" DC \
+        --dns-backend=SAMBA_INTERNAL \
+        --option="dns forwarder = $DC_DNS_FORWARDER" \
+        -U"${DC_NETBIOS}\\administrator" \
+        --password="$DC_ADMIN_PASS" 2>&1 | tail -20; then
+        apply_hardening_to_smb_conf
+        post_provision_setup "$DC_REALM" "$DC_DNS_FORWARDER"
+        info "Joined as additional DC!\nRealm: $DC_REALM"
+    else
+        info "Join FAILED.\n\nCheck connectivity to $existing_dc and credentials."
+    fi
+}
+
+domain_join_rodc() {
+    local DC_REALM DC_NETBIOS DC_ADMIN_PASS DC_DNS_FORWARDER
+    collect_domain_info || return
+
+    local existing_dc
+    existing_dc=$(whiptail --inputbox "FQDN or IP of writable DC:" \
+        10 64 "" 3>&1 1>&2 2>&3) || return
+
+    yesno "Join as RODC?\n\nRealm: $DC_REALM\nSource DC: $existing_dc" || return
+
+    rm -f /etc/samba/smb.conf
+    systemctl stop samba-ad-dc 2>/dev/null || true
+    write_krb5_conf "$DC_REALM"
+    echo -e "search ${DC_REALM,,}\nnameserver ${existing_dc}" > /etc/resolv.conf
+
+    whiptail --infobox "Joining as RODC... This may take several minutes." 8 60
+
+    if samba-tool domain join "$DC_REALM" RODC \
+        --dns-backend=SAMBA_INTERNAL \
+        --option="dns forwarder = $DC_DNS_FORWARDER" \
+        -U"${DC_NETBIOS}\\administrator" \
+        --password="$DC_ADMIN_PASS" 2>&1 | tail -20; then
+        apply_hardening_to_smb_conf
+        post_provision_setup "$DC_REALM" "$DC_DNS_FORWARDER"
+        info "Joined as RODC!\nRealm: $DC_REALM"
+    else
+        info "RODC join FAILED."
+    fi
+}
+
+#===============================================================================
+# 3. POST-DOMAIN SETUP
+#===============================================================================
+menu_post_domain() {
+    is_provisioned || { info "Not provisioned yet. Use Domain Operations (2) first."; return; }
+
+    while true; do
+        local choice
+        choice=$(whiptail --title "Post-Domain Setup" \
+            --menu "Configure services after domain provisioning." \
+            $WT_HEIGHT $WT_WIDTH $WT_MENU_HEIGHT \
+            "1" "Enable Domain Logins (winbind + NSS + PAM)" \
+            "2" "Grant sudo to Domain Admins" \
+            "3" "Configure NTP (Chrony) for AD" \
+            "4" "Reset Administrator Password" \
+            "B" "Back" \
+            3>&1 1>&2 2>&3) || return
+
+        case "$choice" in
+            1) setup_domain_logins ;;
+            2) setup_domain_sudo ;;
+            3) setup_chrony ;;
+            4) reset_admin_password ;;
+            B|b) return ;;
+        esac
+    done
+}
+
+setup_domain_logins() {
+    yesno "Enable AD domain account logins via SSH?\n\nThis adds winbind to NSS, configures PAM mkhomedir,\nand sets default shell to /bin/bash." || return
+
+    local nss="/etc/nsswitch.conf"
+    cp "$nss" "${nss}.bak-$(date +%s)"
+
+    if ! grep -q 'winbind' "$nss"; then
+        sed -i 's/^passwd:\s*.*/passwd:         files winbind/' "$nss"
+        sed -i 's/^group:\s*.*/group:          files winbind/' "$nss"
+    fi
+
+    pam-auth-update --enable mkhomedir 2>/dev/null || {
+        grep -q 'pam_mkhomedir' /etc/pam.d/common-session 2>/dev/null || \
+            echo "session required pam_mkhomedir.so skel=/etc/skel umask=0022" >> /etc/pam.d/common-session
+    }
+
+    local smb="/etc/samba/smb.conf"
+    if ! grep -q 'template homedir' "$smb" 2>/dev/null; then
+        sed -i '/\[global\]/a\\n        template homedir = /home/%U\n        template shell = /bin/bash' "$smb"
+    fi
+
+    systemctl restart samba-ad-dc
+    sleep 2
+
+    local test_output
+    test_output=$(wbinfo -u 2>&1 | head -5)
+    info "Domain logins configured.\n\nwbinfo -u:\n${test_output}\n\nSSH: ssh DOMAIN\\\\user@server"
+}
+
+setup_domain_sudo() {
+    local netbios
+    netbios=$(get_netbios)
+    [[ "$netbios" == "(not provisioned)" ]] && { info "Not provisioned."; return; }
+
+    local sudo_group
+    sudo_group=$(whiptail --inputbox "Domain group to grant sudo:" \
+        10 64 "Domain Admins" 3>&1 1>&2 2>&3) || return
+
+    local sudoers_file="/etc/sudoers.d/domain-admins"
+    cat > "$sudoers_file" << SUDOEOF
+%${netbios}\\\\${sudo_group}  ALL=(ALL:ALL) ALL
+SUDOEOF
+    chmod 440 "$sudoers_file"
+
+    if visudo -cf "$sudoers_file" &>/dev/null; then
+        info "Sudo granted to '${netbios}\\${sudo_group}'."
+    else
+        rm -f "$sudoers_file"
+        info "ERROR: Syntax validation failed. Entry removed."
+    fi
+}
+
+setup_chrony() {
+    local subnet
+    subnet=$(whiptail --inputbox "Network subnet for NTP clients (e.g., 192.168.1.0/24):" \
+        10 64 "192.168.1.0/24" 3>&1 1>&2 2>&3) || return
+
+    cat > /etc/chrony/chrony.conf << CHRONEOF
+server time.cloudflare.com iburst
+server time.google.com iburst
+pool 2.debian.pool.ntp.org iburst
+driftfile /var/lib/chrony/drift
+allow ${subnet}
+ntpsigndsocket /var/lib/samba/ntp_signd
+makestep 1.0 3
+CHRONEOF
+
+    mkdir -p /var/lib/samba/ntp_signd
+    chown root:_chrony /var/lib/samba/ntp_signd 2>/dev/null || \
+    chown root:chrony /var/lib/samba/ntp_signd 2>/dev/null || true
+    chmod 750 /var/lib/samba/ntp_signd
+
+    systemctl enable chrony
+    systemctl restart chrony
+    info "Chrony configured.\nClients allowed from: $subnet\nNTP signing enabled."
+}
+
+reset_admin_password() {
+    local new_pass confirm_pass
+    new_pass=$(whiptail --passwordbox "New Administrator password:" 10 64 3>&1 1>&2 2>&3) || return
+    confirm_pass=$(whiptail --passwordbox "Confirm:" 10 64 3>&1 1>&2 2>&3) || return
+    [[ "$new_pass" != "$confirm_pass" ]] && { info "Passwords don't match."; return; }
+
+    if samba-tool user setpassword administrator --newpassword="$new_pass" 2>&1; then
+        info "Password updated."
+    else
+        info "ERROR: Check complexity requirements."
+    fi
+}
+
+#===============================================================================
+# 4. SYSVOL REPLICATION
+#===============================================================================
+menu_sysvol_sync() {
+    is_provisioned || { info "Not provisioned."; return; }
+
+    while true; do
+        local choice
+        choice=$(whiptail --title "SYSVOL Replication" \
+            --menu "Samba uses rsync-over-SSH for SYSVOL sync (no native DFS-R).\nPrimary DC: push. Replicas: pull." \
+            $WT_HEIGHT $WT_WIDTH $WT_MENU_HEIGHT \
+            "1" "Configure SYSVOL Sync" \
+            "2" "Generate SSH Key Pair" \
+            "3" "Dry Run (test sync)" \
+            "4" "Run Sync Now" \
+            "5" "Reset SYSVOL ACLs" \
+            "6" "Show Sync Status" \
+            "B" "Back" \
+            3>&1 1>&2 2>&3) || return
+
+        case "$choice" in
+            1) configure_sysvol_sync ;;
+            2) generate_sync_sshkey ;;
+            3) test_sysvol_sync ;;
+            4) run_sysvol_sync ;;
+            5) reset_sysvol_acls ;;
+            6) show_sync_status ;;
+            B|b) return ;;
+        esac
+    done
+}
+
+configure_sysvol_sync() {
+    local sync_role
+    sync_role=$(whiptail --title "Sync Role" \
+        --menu "Is this the PRIMARY (push) or REPLICA (pull)?" 12 60 4 \
+        "pull"  "REPLICA — pull from primary" \
+        "push"  "PRIMARY — push to replica" \
+        3>&1 1>&2 2>&3) || return
+
+    local remote_dc remote_user interval
+    remote_dc=$(whiptail --inputbox "FQDN or IP of the other DC:" 10 64 "" 3>&1 1>&2 2>&3) || return
+    remote_user=$(whiptail --inputbox "SSH user on remote DC:" 10 64 "root" 3>&1 1>&2 2>&3) || return
+    interval=$(whiptail --inputbox "Sync interval (minutes):" 10 64 "5" 3>&1 1>&2 2>&3) || return
+
+    cat > /etc/samba/sysvol-sync.conf << SCEOF
+SYNC_ROLE="${sync_role}"
+REMOTE_DC="${remote_dc}"
+REMOTE_USER="${remote_user}"
+SSH_KEY="/root/.ssh/sysvol-sync"
+SCEOF
+
+    echo "*/${interval} * * * * root /usr/local/sbin/sysvol-sync" > /etc/cron.d/sysvol-sync
+    chmod 644 /etc/cron.d/sysvol-sync
+
+    info "Configured.\nRole: ${sync_role} | Remote: ${remote_dc}\nInterval: ${interval}min\n\nNext: Generate SSH key (2), then test (3)."
+}
+
+generate_sync_sshkey() {
+    local key_path="/root/.ssh/sysvol-sync"
+    [[ -f "$key_path" ]] && ! yesno "Key exists. Overwrite?" && return
+
+    mkdir -p /root/.ssh; chmod 700 /root/.ssh
+    ssh-keygen -t ed25519 -f "$key_path" -N "" -C "sysvol-sync@$(hostname -s)"
+
+    whiptail --title "Public Key" --scrolltext --msgbox \
+        "Copy to remote DC's /root/.ssh/authorized_keys:\n\n$(cat ${key_path}.pub)" 14 76
+}
+
+test_sysvol_sync() {
+    [[ -f /etc/samba/sysvol-sync.conf ]] || { info "Not configured."; return; }
+    source /etc/samba/sysvol-sync.conf
+    whiptail --infobox "Dry run..." 6 40
+    local output
+    case "${SYNC_ROLE:-pull}" in
+        pull) output=$(rsync -avzn --delete -e "ssh -i ${SSH_KEY} -o StrictHostKeyChecking=no" \
+                "${REMOTE_USER}@${REMOTE_DC}:/var/lib/samba/sysvol/" "/var/lib/samba/sysvol/" --exclude='*.tmp' 2>&1) ;;
+        push) output=$(rsync -avzn --delete -e "ssh -i ${SSH_KEY} -o StrictHostKeyChecking=no" \
+                "/var/lib/samba/sysvol/" "${REMOTE_USER}@${REMOTE_DC}:/var/lib/samba/sysvol/" --exclude='*.tmp' 2>&1) ;;
+    esac
+    whiptail --title "Dry Run" --scrolltext --msgbox "$output" 20 76
+}
+
+run_sysvol_sync() {
+    [[ -f /etc/samba/sysvol-sync.conf ]] || { info "Not configured."; return; }
+    yesno "Run SYSVOL sync now?" || return
+    whiptail --infobox "Syncing..." 6 40
+    /usr/local/sbin/sysvol-sync 2>&1
+    info "Done. Log: /var/log/samba/sysvol-sync.log"
+}
+
+reset_sysvol_acls() {
+    yesno "Reset SYSVOL ACLs?" || return
+    local output; output=$(samba-tool ntacl sysvolreset 2>&1)
+    info "ACLs reset.\n${output}"
+}
+
+show_sync_status() {
+    local st="SYSVOL Sync Status\n==================\n\n"
+    if [[ -f /etc/samba/sysvol-sync.conf ]]; then
+        source /etc/samba/sysvol-sync.conf
+        st+="Role: ${SYNC_ROLE:-?} | Remote: ${REMOTE_DC:-?}\nKey: ${SSH_KEY:-?}\n\n"
+    else
+        st+="Not configured.\n\n"
+    fi
+    [[ -f /etc/cron.d/sysvol-sync ]] && st+="Cron: $(cat /etc/cron.d/sysvol-sync)\n\n" || st+="Cron: not installed\n\n"
+    [[ -f /var/log/samba/sysvol-sync.log ]] && st+="Last 10 lines:\n$(tail -10 /var/log/samba/sysvol-sync.log)\n" || st+="No sync log yet.\n"
+    whiptail --title "Sync Status" --scrolltext --msgbox "$st" 22 76
+}
+
+#===============================================================================
+# 5. SECURITY HARDENING
+#===============================================================================
+menu_hardening() {
+    while true; do
+        local choice
+        choice=$(whiptail --title "Security Hardening" \
+            --menu "Harden for production and Windows Server 2025 compatibility." \
+            $WT_HEIGHT $WT_WIDTH $WT_MENU_HEIGHT \
+            "1" "Apply SMB/LDAP/Kerberos Hardening (WS2025)" \
+            "2" "Enable AD DC Firewall (nftables)" \
+            "3" "Disable Firewall" \
+            "4" "Generate Self-Signed TLS Certificate" \
+            "5" "Show Hardening Status" \
+            "B" "Back" \
+            3>&1 1>&2 2>&3) || return
+
+        case "$choice" in
+            1) apply_ws2025_hardening ;;
+            2) enable_firewall ;;
+            3) disable_firewall ;;
+            4) generate_tls_cert ;;
+            5) show_hardening_status ;;
+            B|b) return ;;
+        esac
+    done
+}
+
+apply_ws2025_hardening() {
+    is_provisioned || { info "Not provisioned."; return; }
+    yesno "Apply WS2025 hardening?\n\n- SMB3 mandatory signing\n- AES-only Kerberos\n- LDAP strong auth\n- NTLMv2 only\n- TLS 1.2+\n\nEnsure all clients support these." || return
+
+    apply_hardening_to_smb_conf
+    systemctl restart samba-ad-dc
+
+    is_addc_running && info "Hardening applied and service restarted." || \
+        info "WARNING: Service failed. Check journalctl -u samba-ad-dc"
+}
+
+enable_firewall() {
+    [[ -f /etc/nftables-samba-addc.conf ]] || { info "Ruleset not found. Re-run prepare-image.sh."; return; }
+    yesno "Enable AD DC firewall?\nOnly AD ports + SSH will be open." || return
+
+    cp /etc/nftables-samba-addc.conf /etc/nftables.conf
+    systemctl enable nftables
+    nft -f /etc/nftables.conf
+    info "Firewall enabled. Verify: nft list ruleset"
+}
+
+disable_firewall() {
+    yesno "Disable firewall?" || return
+    nft flush ruleset 2>/dev/null || true
+    systemctl disable nftables 2>/dev/null || true
+    info "Firewall disabled."
+}
+
+generate_tls_cert() {
+    is_provisioned || { info "Not provisioned."; return; }
+
+    local realm fqdn cert_dir
+    realm=$(get_realm); fqdn=$(get_fqdn)
+    cert_dir="/var/lib/samba/private/tls"
+    mkdir -p "$cert_dir"
+
+    [[ -f "$cert_dir/cert.pem" ]] && ! yesno "Cert exists. Regenerate?" && return
+
+    whiptail --infobox "Generating TLS certificate..." 6 50
+    openssl req -x509 -nodes -days 3650 -newkey rsa:4096 \
+        -keyout "$cert_dir/key.pem" -out "$cert_dir/cert.pem" \
+        -subj "/CN=${fqdn}/O=${realm}" \
+        -addext "subjectAltName=DNS:${fqdn},DNS:*.${realm,,}" 2>/dev/null
+
+    cp "$cert_dir/cert.pem" "$cert_dir/ca.pem"
+    chmod 600 "$cert_dir/key.pem"
+    chmod 644 "$cert_dir/cert.pem" "$cert_dir/ca.pem"
+
+    local smb="/etc/samba/smb.conf"
+    if ! grep -q 'tls keyfile' "$smb" 2>/dev/null; then
+        cat >> "$smb" << TLSEOF
+
+        tls keyfile = ${cert_dir}/key.pem
+        tls certfile = ${cert_dir}/cert.pem
+        tls cafile = ${cert_dir}/ca.pem
+TLSEOF
+    fi
+
+    systemctl restart samba-ad-dc
+    info "TLS cert generated at ${cert_dir}/\nReplace with CA-signed cert for production."
+}
+
+show_hardening_status() {
+    local st=""
+    if is_provisioned; then
+        local smb="/etc/samba/smb.conf"
+        st+="SMB Signing:     $(grep -q 'server signing = mandatory' "$smb" 2>/dev/null && echo 'ENFORCED' || echo 'not enforced')\n"
+        st+="Min Protocol:    $(grep -oP '(?<=server min protocol = ).*' "$smb" 2>/dev/null | head -1 || echo 'default')\n"
+        st+="LDAP Strong:     $(grep -q 'ldap server require strong auth = yes' "$smb" 2>/dev/null && echo 'YES' || echo 'no')\n"
+        st+="Kerberos:        $(grep -q 'aes256' "$smb" 2>/dev/null && echo 'AES only' || echo 'default (incl RC4)')\n"
+        st+="NTLM:            $(grep -oP '(?<=ntlm auth = ).*' "$smb" 2>/dev/null | head -1 || echo 'default')\n"
+        st+="TLS Enabled:     $(grep -q 'tls enabled = yes' "$smb" 2>/dev/null && echo 'YES' || echo 'no')\n"
+        st+="TLS Cert:        $([[ -f /var/lib/samba/private/tls/cert.pem ]] && echo 'present' || echo 'not generated')\n"
+        st+="Audit:           $(grep -q 'auth_audit:3' "$smb" 2>/dev/null && echo 'enabled' || echo 'default')\n"
+    else
+        st+="Domain not provisioned.\n"
+    fi
+    st+="\nFirewall:        $(nft list ruleset 2>/dev/null | grep -q 'filter' && echo 'active' || echo 'inactive')\n"
+    st+="PowerShell SSH:  $(grep -q 'Subsystem.*powershell' /etc/ssh/sshd_config 2>/dev/null && echo 'enabled' || echo 'not configured')\n"
+    st+="Update Policy:   $(get_update_policy)\n"
+
+    whiptail --title "Hardening Status" --msgbox "$st" 22 64
+}
+
+#===============================================================================
+# 6. DIAGNOSTICS
+#===============================================================================
+menu_diagnostics() {
+    while true; do
+        local choice
+        choice=$(whiptail --title "Diagnostics" \
+            --menu "Run tests on this DC." \
+            $WT_HEIGHT $WT_WIDTH $WT_MENU_HEIGHT \
+            "1" "Full Sanity Check" \
+            "2" "Test DNS Records" \
+            "3" "Test Kerberos (kinit)" \
+            "4" "Test SMB Shares" \
+            "5" "Domain Level & FSMO Roles" \
+            "6" "Replication Status" \
+            "7" "Samba Logs (last 50)" \
+            "B" "Back" \
+            3>&1 1>&2 2>&3) || return
+
+        case "$choice" in
+            1) run_full_sanity ;;
+            2) test_dns ;;
+            3) test_kerberos ;;
+            4) test_smb ;;
+            5) show_domain_info ;;
+            6) test_replication ;;
+            7) show_logs ;;
+            B|b) return ;;
+        esac
+    done
+}
+
+run_full_sanity() {
+    local r="" pass=0 fail=0 wrn=0
+    r+="=== Sanity Check === $(date)\nHost: $(get_fqdn)\n\n"
+
+    # Services
+    r+="[Services]\n"
+    is_addc_running && { r+="  ✓ samba-ad-dc running\n"; ((pass++)); } || { r+="  ✗ samba-ad-dc NOT running\n"; ((fail++)); }
+    systemctl is-active chrony &>/dev/null && { r+="  ✓ chrony running\n"; ((pass++)); } || { r+="  ! chrony not running\n"; ((wrn++)); }
+
+    # DNS
+    r+="\n[DNS]\n"
+    local rl fq
+    rl=$(get_realm | tr '[:upper:]' '[:lower:]' 2>/dev/null)
+    fq=$(get_fqdn)
+
+    dig @localhost "$fq" +short 2>/dev/null | grep -q '[0-9]' && { r+="  ✓ A record resolves\n"; ((pass++)); } || { r+="  ✗ A record missing\n"; ((fail++)); }
+    dig -t SRV @localhost "_ldap._tcp.${rl}" +short 2>/dev/null | grep -q '[0-9]' && { r+="  ✓ _ldap._tcp SRV\n"; ((pass++)); } || { r+="  ✗ _ldap._tcp SRV missing\n"; ((fail++)); }
+    dig -t SRV @localhost "_kerberos._tcp.${rl}" +short 2>/dev/null | grep -q '[0-9]' && { r+="  ✓ _kerberos._tcp SRV\n"; ((pass++)); } || { r+="  ✗ _kerberos._tcp SRV missing\n"; ((fail++)); }
+    dig @localhost google.com +short 2>/dev/null | grep -q '[0-9]' && { r+="  ✓ DNS forwarding works\n"; ((pass++)); } || { r+="  ! forwarding failed\n"; ((wrn++)); }
+
+    # Kerberos
+    r+="\n[Kerberos]\n"
+    klist -s 2>/dev/null && { r+="  ✓ Valid TGT\n"; ((pass++)); } || { r+="  ! No TGT (run kinit)\n"; ((wrn++)); }
+
+    # SMB
+    r+="\n[SMB]\n"
+    smbclient -L localhost -U% -N 2>/dev/null | grep -q 'sysvol' && { r+="  ✓ sysvol accessible\n"; ((pass++)); } || { r+="  ✗ sysvol missing\n"; ((fail++)); }
+    smbclient -L localhost -U% -N 2>/dev/null | grep -q 'netlogon' && { r+="  ✓ netlogon accessible\n"; ((pass++)); } || { r+="  ✗ netlogon missing\n"; ((fail++)); }
+
+    # Winbind
+    r+="\n[Winbind]\n"
+    wbinfo -p 2>/dev/null | grep -q 'succeeded' && { r+="  ✓ winbind ping OK\n"; ((pass++)); } || { r+="  ! winbind ping failed\n"; ((wrn++)); }
+    getent passwd administrator &>/dev/null && { r+="  ✓ NSS resolves administrator\n"; ((pass++)); } || { r+="  ! cannot resolve administrator\n"; ((wrn++)); }
+
+    # Hostname
+    r+="\n[Hostname]\n"
+    local hosts_ip actual_ip
+    hosts_ip=$(grep -m1 "$(hostname -s)" /etc/hosts 2>/dev/null | awk '{print $1}')
+    actual_ip=$(get_ip | cut -d/ -f1)
+    [[ "$hosts_ip" == "$actual_ip" ]] && { r+="  ✓ /etc/hosts matches interface\n"; ((pass++)); } || { r+="  ✗ IP mismatch (hosts=$hosts_ip iface=$actual_ip)\n"; ((fail++)); }
+
+    # PowerShell
+    r+="\n[PowerShell]\n"
+    command -v pwsh &>/dev/null && { r+="  ✓ pwsh installed ($(pwsh --version 2>/dev/null))\n"; ((pass++)); } || { r+="  ! pwsh not installed\n"; ((wrn++)); }
+    grep -q 'Subsystem.*powershell' /etc/ssh/sshd_config 2>/dev/null && { r+="  ✓ SSH remoting configured\n"; ((pass++)); } || { r+="  ! SSH remoting not configured\n"; ((wrn++)); }
+
+    r+="\n========================================\n"
+    r+="PASSED: $pass | WARNINGS: $wrn | FAILED: $fail\n"
+    [[ $fail -eq 0 ]] && r+="\nOverall: HEALTHY" || r+="\nOverall: ISSUES DETECTED"
+
+    whiptail --title "Sanity Check" --scrolltext --msgbox "$r" 34 76
+}
+
+test_dns() {
+    is_provisioned || { info "Not provisioned."; return; }
+    local rl fq out
+    rl=$(get_realm | tr '[:upper:]' '[:lower:]'); fq=$(get_fqdn)
+    out="=== DNS Tests ===\n\n"
+    out+="A ($fq):\n$(dig @localhost "$fq" +short 2>&1)\n\n"
+    out+="_ldap._tcp:\n$(dig -t SRV @localhost "_ldap._tcp.${rl}" +short 2>&1)\n\n"
+    out+="_kerberos._tcp:\n$(dig -t SRV @localhost "_kerberos._tcp.${rl}" +short 2>&1)\n\n"
+    out+="_gc._tcp:\n$(dig -t SRV @localhost "_gc._tcp.${rl}" +short 2>&1)\n\n"
+    out+="Forwarding (google.com):\n$(dig @localhost google.com +short 2>&1)\n"
+    whiptail --title "DNS" --scrolltext --msgbox "$out" 26 76
+}
+
+test_kerberos() {
+    is_provisioned || { info "Not provisioned."; return; }
+    local pass; pass=$(whiptail --passwordbox "Administrator password:" 10 60 3>&1 1>&2 2>&3) || return
+    local out; out=$(echo "$pass" | kinit administrator 2>&1); out+="\n\n$(klist 2>&1)"
+    whiptail --title "Kerberos" --scrolltext --msgbox "$out" 20 76
+}
+
+test_smb() {
+    whiptail --title "SMB" --scrolltext --msgbox "$(smbclient -L localhost -U% -N 2>&1)" 20 76
+}
+
+show_domain_info() {
+    is_provisioned || { info "Not provisioned."; return; }
+    local out="=== Domain ===\n\n$(samba-tool domain level show 2>&1)\n\nFSMO:\n$(samba-tool fsmo show 2>&1)\n"
+    whiptail --title "Domain Info" --scrolltext --msgbox "$out" 24 76
+}
+
+test_replication() {
+    is_provisioned || { info "Not provisioned."; return; }
+    whiptail --title "Replication" --scrolltext --msgbox "$(samba-tool drs showrepl 2>&1)" 24 76
+}
+
+show_logs() {
+    whiptail --title "Logs (last 50)" --scrolltext --msgbox "$(journalctl -u samba-ad-dc -n 50 --no-pager 2>&1)" 24 76
+}
+
+#===============================================================================
+# 7. SERVICE MANAGEMENT
+#===============================================================================
+menu_services() {
+    while true; do
+        local addc chr nft
+        addc=$(systemctl is-active samba-ad-dc 2>/dev/null || echo "inactive")
+        chr=$(systemctl is-active chrony 2>/dev/null || echo "inactive")
+        nft=$(systemctl is-active nftables 2>/dev/null || echo "inactive")
+
+        local choice
+        choice=$(whiptail --title "Services" \
+            --menu "samba-ad-dc: $addc | chrony: $chr | nftables: $nft" \
+            $WT_HEIGHT $WT_WIDTH $WT_MENU_HEIGHT \
+            "1" "Start samba-ad-dc" \
+            "2" "Stop samba-ad-dc" \
+            "3" "Restart samba-ad-dc" \
+            "4" "Start chrony" \
+            "5" "Restart chrony" \
+            "6" "Full status" \
+            "B" "Back" \
+            3>&1 1>&2 2>&3) || return
+
+        case "$choice" in
+            1) systemctl start samba-ad-dc; info "Started." ;;
+            2) systemctl stop samba-ad-dc; info "Stopped." ;;
+            3) systemctl restart samba-ad-dc; sleep 2
+               is_addc_running && info "Restarted." || info "FAILED. Check logs." ;;
+            4) systemctl start chrony; info "Started." ;;
+            5) systemctl restart chrony; info "Restarted." ;;
+            6) whiptail --title "Status" --scrolltext --msgbox \
+                "$(systemctl status samba-ad-dc chrony nftables 2>&1 | head -40)" 24 76 ;;
+            B|b) return ;;
+        esac
+    done
+}
+
+#===============================================================================
+# 8. POWER
+#===============================================================================
+menu_power() {
+    local choice
+    choice=$(whiptail --title "Power" --menu "" 12 50 4 \
+        "1" "Reboot" "2" "Shutdown" "B" "Back" \
+        3>&1 1>&2 2>&3) || return
+    case "$choice" in
+        1) yesno "Reboot now?" && reboot ;;
+        2) yesno "Shutdown now?" && shutdown -h now ;;
+    esac
+}
+
+#===============================================================================
+# ENTRY
+#===============================================================================
+check_root
+main_menu
