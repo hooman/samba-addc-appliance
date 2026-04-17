@@ -1,6 +1,10 @@
 #cloud-config
-hostname: router1
-fqdn: router1.lab.test
+# Template consumed by lab/stage-router-artifacts.sh
+# Placeholders: @@HOSTNAME@@ @@FQDN@@ @@DOMAIN@@ @@LAN_IP@@ @@LAN_SUBNET_CIDR@@
+#               @@DHCP_START@@ @@DHCP_END@@ @@SSH_PUBKEY@@ @@EXTRA_DNSMASQ@@
+
+hostname: @@HOSTNAME@@
+fqdn: @@FQDN@@
 manage_etc_hosts: true
 
 users:
@@ -9,7 +13,7 @@ users:
     groups: [sudo, adm]
     shell: /bin/bash
     ssh_authorized_keys:
-      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPZHcjlrKu2fdbTjP36fZz+p+8cLyc04AD2xzoDJyyIv hooman@mac.com
+      - @@SSH_PUBKEY@@
 
 ssh_pwauth: false
 disable_root: true
@@ -71,36 +75,27 @@ write_files:
   - path: /etc/dnsmasq.d/lab.conf
     permissions: '0644'
     content: |
-      # Only serve on the LAN interface
+      # Serve only on the LAN interface
       interface=eth1
       bind-interfaces
-      listen-address=10.10.10.1,127.0.0.1
+      listen-address=@@LAN_IP@@,127.0.0.1
 
-      # Stop dnsmasq from using /etc/resolv.conf for upstream (we set explicit servers below)
+      # Manage our own upstream — don't read /etc/resolv.conf
       no-resolv
       no-poll
 
       # Dynamic DHCP pool
-      dhcp-range=10.10.10.100,10.10.10.200,12h
-      dhcp-option=option:router,10.10.10.1
-      dhcp-option=option:dns-server,10.10.10.1
-      dhcp-option=option:domain-name,lab.test
+      dhcp-range=@@DHCP_START@@,@@DHCP_END@@,12h
+      dhcp-option=option:router,@@LAN_IP@@
+      dhcp-option=option:dns-server,@@LAN_IP@@
+      dhcp-option=option:domain-name,@@DOMAIN@@
 
-      # Reservations — Hyper-V default MAC prefix is 00:15:5d:
-      dhcp-host=00:15:5d:0a:0a:0a,WS2025-DC1,10.10.10.10,infinite
-      dhcp-host=00:15:5d:0a:0a:14,samba-dc1,10.10.10.20,infinite
-
-      # Forward lab.test zone to whichever DC is up; fall back to both candidates.
-      # If neither is reachable yet, queries for lab.test will just fail — expected
-      # during pre-provision.
-      server=/lab.test/10.10.10.10
-      server=/lab.test/10.10.10.20
+@@EXTRA_DNSMASQ@@
 
       # Upstream public DNS for everything else
       server=1.1.1.1
       server=8.8.8.8
 
-      # Faster negative answers, no DNS rebind protection on lab net
       domain-needed
       bogus-priv
       cache-size=1000
@@ -114,23 +109,14 @@ write_files:
       DNSStubListener=no
 
 runcmd:
-  # IP forwarding
   - sysctl --system
-
-  # Put dnsmasq in charge of DNS on the host itself
   - mkdir -p /etc/systemd/resolved.conf.d
   - systemctl restart systemd-resolved 2>/dev/null || true
   - rm -f /etc/resolv.conf
-  - 'printf "nameserver 127.0.0.1\nsearch lab.test\n" > /etc/resolv.conf'
-
-  # Apply firewall + NAT
+  - 'printf "nameserver 127.0.0.1\nsearch @@DOMAIN@@\n" > /etc/resolv.conf'
   - systemctl enable --now nftables
   - nft -f /etc/nftables.conf
-
-  # Start DHCP/DNS
   - systemctl enable --now dnsmasq
-
-  # Summary marker — used by Wait-Cloud-Init to know router is ready
   - 'echo "router-ready: $(date --iso-8601=seconds)" > /var/log/router-ready.marker'
 
-final_message: "router1 up in $UPTIME seconds (cloud-init)"
+final_message: "@@HOSTNAME@@ up in $UPTIME seconds (cloud-init)"

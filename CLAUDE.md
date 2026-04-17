@@ -253,27 +253,29 @@ ssh nmadmin@server 'pwsh -File D:\ISO\lab-scripts\Wait-DCReady.ps1'
 ssh nmadmin@server 'pwsh -File D:\ISO\lab-scripts\Apply-SecurityBaseline.ps1'
 ```
 
-### Staging router artifacts (one-time, on Mac)
+### Staging router artifacts (one command, on Mac)
 
 ```bash
-# Download Debian 13 genericcloud qcow2 (~300 MB) and convert to VHDX
-cd /Volumes/ISO
-curl -sSL -O https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2
-cp debian-13-genericcloud-amd64.qcow2 /tmp/debian-router.qcow2
-qemu-img convert -p -O vhdx -o subformat=dynamic \
-    /tmp/debian-router.qcow2 /tmp/debian-router-base.vhdx
-cp /tmp/debian-router-base.vhdx /Volumes/ISO/debian-13-router-base.vhdx
-
-# Build NoCloud seed ISO
-mkdir -p /tmp/seed-router
-# (user-data, meta-data, network-config — see lab/seed/ for canonical copies)
-cp lab/seed/* /tmp/seed-router/
-hdiutil makehybrid -iso -joliet -default-volume-name CIDATA \
-    -o /Volumes/ISO/router1-seed.iso /tmp/seed-router/
+cd <repo>
+lab/stage-router-artifacts.sh --extra-dnsmasq lab/seed/dnsmasq-samba-lab.conf
 ```
 
-The qemu-img conversion takes ~60 s. Both artifacts are small enough to live
-on the ISO share permanently; re-running the lab build reuses them.
+This script:
+
+1. Downloads Debian 13 genericcloud qcow2 (~300 MB, cached at
+   `/Volumes/ISO/debian-13-genericcloud-amd64.qcow2`)
+2. Converts to VHDX with `qemu-img`, writes `/Volumes/ISO/debian-13-router-base.vhdx`
+3. Substitutes placeholders in `lab/seed/*.tpl` (hostname, FQDN, LAN IP, SSH
+   pubkey from `~/.ssh/id_ed25519.pub`, DHCP pool, extra dnsmasq reservations)
+4. Builds the NoCloud seed ISO via `hdiutil makehybrid`, writes
+   `/Volumes/ISO/<hostname>-seed.iso`
+
+Skip-if-exists on the base VHDX; always regenerate the seed ISO. Run
+`--help` for options (`-n` hostname, `-i` LAN IP, `-d` domain, `-k` pubkey
+path, `--extra-dnsmasq` extra config snippet to merge into dnsmasq.d).
+
+The base VHDX is ~1.2 GB; the seed ISO is ~1 MB. Both stay on the ISO share
+permanently and are reused across lab rebuilds.
 
 ---
 

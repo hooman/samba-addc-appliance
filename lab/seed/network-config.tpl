@@ -7,4 +7,4 @@ ethernets:
     dhcp4: false
     dhcp6: false
     addresses:
-      - 10.10.10.1/24
+      - @@LAN_IP@@/@@LAN_PREFIX@@

@@ -65,12 +65,9 @@ lab rebuilds). See "Step 1 — Stage lab artifacts" below.
 
 ## Step 1 — Stage lab artifacts (one-time)
 
-Most of these are the same as v1; the additions are the **Debian cloud image**
-and the **NoCloud seed ISO** for the router VM.
+### 1a. Source ISOs
 
-### 1a. Source ISOs (same as v1)
-
-You should already have these on `/Volumes/ISO/`. If not:
+These should already be on `/Volumes/ISO/`:
 
 ```
 debian-13.4.0-amd64-netinst.iso                                      ~650 MB
@@ -78,49 +75,40 @@ debian-13.4.0-amd64-netinst.iso                                      ~650 MB
 WS2025-2602-Security-Baseline.zip
 ```
 
-### 1b. Build the router base VHDX
+### 1b. Build the router VHDX and seed ISO (one command)
 
 ```bash
-cd /Volumes/ISO
-curl -sSL -O https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2
-
-# qemu-img can't lock on SMB; copy to local first
-cp debian-13-genericcloud-amd64.qcow2 /tmp/debian-router.qcow2
-qemu-img convert -p -O vhdx -o subformat=dynamic \
-    /tmp/debian-router.qcow2 /tmp/debian-router-base.vhdx
-cp /tmp/debian-router-base.vhdx /Volumes/ISO/debian-13-router-base.vhdx
-rm -f /tmp/debian-router-base.vhdx /tmp/debian-router.qcow2
-
-ls -lh /Volumes/ISO/debian-13-router-base.vhdx   # ~1.2 GB
+cd ~/Developer/samba-addc-appliance    # wherever the repo lives
+lab/stage-router-artifacts.sh --extra-dnsmasq lab/seed/dnsmasq-samba-lab.conf
 ```
 
-### 1c. Build the router's cloud-init seed ISO
+Reads your `~/.ssh/id_ed25519.pub` automatically (override with `-k`), picks up
+the repo's templates in `lab/seed/*.tpl`, writes two files to `/Volumes/ISO/`:
 
-The cloud-init files (`user-data`, `meta-data`, `network-config`) live in
-`lab/seed/` in the repo. Build the ISO once:
+- `debian-13-router-base.vhdx` — shared read-only base (the Debian genericcloud
+  qcow2 converted via `qemu-img`). Builds once; skipped on re-runs.
+- `router1-seed.iso` — per-router NoCloud seed with your SSH key and the
+  lab-specific dnsmasq reservations for WS2025-DC1 + samba-dc1. Always
+  regenerated (cheap — ~1 second).
+
+First run takes ~2 minutes (qcow2 download + conversion). Subsequent runs
+take seconds.
+
+For a **second** router (e.g., `router2` at `10.10.20.1` for a multi-site
+test), pass different args:
 
 ```bash
-cd ~/Developer/samba-addc-appliance   # wherever your repo lives
-mkdir -p /tmp/seed-router
-cp lab/seed/* /tmp/seed-router/
-
-# IMPORTANT: edit lab/seed/user-data to include YOUR ssh-ed25519 public key
-#   (ssh_authorized_keys section). The committed version has the author's key.
-
-hdiutil makehybrid -iso -joliet -default-volume-name CIDATA \
-    -o /Volumes/ISO/router1-seed.iso /tmp/seed-router/
-ls -lh /Volumes/ISO/router1-seed.iso   # ~1 MB
-rm -rf /tmp/seed-router
+lab/stage-router-artifacts.sh -n router2 -i 10.10.20.1    # no -extra-dnsmasq = generic router
 ```
 
-### 1d. Copy lab/ scripts to the host
+### 1c. Copy lab/ scripts to the host
 
 ```bash
 mkdir -p /Volumes/ISO/lab-scripts
 cp lab/*.ps1 lab/*.xml /Volumes/ISO/lab-scripts/
 ```
 
-You repeat this copy any time you edit a lab/\*.ps1 file in the repo.
+Repeat this any time you edit a `lab/*.ps1` file.
 
 ---
 
