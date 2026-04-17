@@ -41,6 +41,34 @@ get_iface()     { ip -4 route show default 2>/dev/null | awk '{print $5}' | head
 is_provisioned() { [[ -f /etc/samba/smb.conf ]] && grep -q 'server role.*active directory' /etc/samba/smb.conf 2>/dev/null; }
 is_addc_running() { systemctl is-active samba-ad-dc &>/dev/null; }
 
+# Query the target DC's rootDSE forestFunctionality attribute (anonymous bind;
+# rootDSE is per spec accessible without auth, even under the WS-baseline
+# LDAP-signing policy) and return the matching Samba `ad dc functional level`
+# string. Falls back to 2008_R2 (Samba's historical default) on any failure.
+#
+#   Input:  $1 = DC hostname or IP
+#   Stdout: one of 2003, 2008, 2008_R2, 2012, 2012_R2, 2016
+#   Return: 0 on success, 1 on query failure (stdout still prints 2008_R2)
+probe_forest_fl() {
+    local dc="$1"
+    local fl_num
+    fl_num=$(ldapsearch -x -LLL -H "ldap://${dc}" -s base -b "" forestFunctionality 2>/dev/null \
+        | awk '/^forestFunctionality:/ { print $2 }')
+    if [[ -z "$fl_num" ]]; then
+        echo "2008_R2"
+        return 1
+    fi
+    case "$fl_num" in
+        2)  echo "2003"    ;;
+        3)  echo "2008"    ;;
+        4)  echo "2008_R2" ;;
+        5)  echo "2012"    ;;
+        6)  echo "2012_R2" ;;
+        7)  echo "2016"    ;;
+        *)  echo "2016"    ;;   # Samba 4.22 caps at 2016 — advertise max we support
+    esac
+}
+
 get_realm() {
     is_provisioned && grep -oP '(?<=realm = ).*' /etc/samba/smb.conf 2>/dev/null | head -1 || echo "(not provisioned)"
 }
@@ -444,21 +472,43 @@ apply_hardening_to_smb_conf() {
     [[ -f "$smb" ]] || return
     grep -q '# --- sconfig hardening ---' "$smb" 2>/dev/null && return
 
-    cat >> "$smb" << 'HARDENEOF'
+    # Insert hardening INTO the [global] section. Appending to EOF lands
+    # after [sysvol]/[netlogon], which makes testparm complain "Global
+    # parameter X found in service section!" and in some cases the value
+    # is actually ignored. Samba's post-provision smb.conf uses tab-indent,
+    # so match that.
+    local tmp
+    tmp=$(mktemp)
+    awk '
+        BEGIN { inserted = 0 }
+        /^\[global\][[:space:]]*$/ && !inserted {
+            print
+            print "\t# --- sconfig hardening ---"
+            print "\tserver signing = mandatory"
+            print "\tclient signing = mandatory"
+            print "\tserver min protocol = SMB3_00"
+            print "\tclient min protocol = SMB3_00"
+            print "\tldap server require strong auth = yes"
+            print "\tkerberos encryption types = strong"
+            print "\tntlm auth = mschapv2-and-ntlmv2-only"
+            print "\ttls enabled = yes"
+            print "\ttls priority = NORMAL:-VERS-ALL:+VERS-TLS1.2:+VERS-TLS1.3"
+            print "\tlog level = 1 auth_audit:3 auth_json_audit:3"
+            print "\tallow dns updates = secure only"
+            inserted = 1
+            next
+        }
+        { print }
+    ' "$smb" > "$tmp"
 
-# --- sconfig hardening ---
-        server signing = mandatory
-        client signing = mandatory
-        server min protocol = SMB3_00
-        client min protocol = SMB3_00
-        ldap server require strong auth = yes
-        kerberos encryption types = aes256-cts-hmac-sha1-96 aes128-cts-hmac-sha1-96
-        ntlm auth = mschapv2-and-ntlmv2-only
-        tls enabled = yes
-        tls priority = NORMAL:-VERS-ALL:+VERS-TLS1.2:+VERS-TLS1.3
-        log level = 1 auth_audit:3 auth_json_audit:3
-        allow dns updates = secure only
-HARDENEOF
+    if [[ $(wc -l < "$tmp") -gt $(wc -l < "$smb") ]]; then
+        mv "$tmp" "$smb"
+    else
+        # Fallback: no [global] line found — leave original alone and warn
+        rm -f "$tmp"
+        echo "[sconfig] WARN: [global] section not found in $smb — hardening NOT applied" >&2
+        return 1
+    fi
 }
 
 post_provision_setup() {
@@ -481,6 +531,102 @@ DNSEOF
     systemctl enable samba-ad-dc
     systemctl start samba-ad-dc
     sleep 3
+}
+
+# Seed /var/lib/samba/sysvol/ from the source DC immediately after joining.
+# Samba doesn't implement DFSR, so without a bootstrap copy the GPO files
+# under Policies/ are empty until sysvol-sync runs on a schedule. We use
+# smbclient (not rsync-over-SSH) because Windows DCs rarely have sshd.
+#
+#   Input:  $1 source DC (FQDN), $2 netbios domain, $3 admin password,
+#           $4 realm (lowercased used for the SYSVOL subtree name)
+seed_sysvol() {
+    local src_dc="$1" netbios="$2" admin_pass="$3" realm="$4"
+    local realm_lower="${realm,,}"
+    local tmpdir
+    tmpdir=$(mktemp -d)
+
+    echo "[sconfig] seeding SYSVOL from //${src_dc}/sysvol/${realm_lower} ..."
+    if smbclient "//${src_dc}/sysvol" \
+            -U "${netbios}\\administrator%${admin_pass}" \
+            -c "recurse ON; prompt OFF; lcd ${tmpdir}; mget ${realm_lower}" \
+            >/dev/null 2>&1; then
+        if [[ -d "${tmpdir}/${realm_lower}" ]]; then
+            cp -a "${tmpdir}/${realm_lower}/." "/var/lib/samba/sysvol/${realm_lower}/"
+            echo "[sconfig] SYSVOL seeded. Resetting NTACLs..."
+            samba-tool ntacl sysvolreset 2>&1 | sed 's/^/[ntacl] /' || true
+            rm -rf "$tmpdir"
+            return 0
+        fi
+    fi
+    echo "[sconfig] WARN: SYSVOL seed failed (smbclient or copy). Policies/ will be empty"
+    echo "[sconfig]       until sysvol-sync runs. Verify SMB signing + creds on $src_dc."
+    rm -rf "$tmpdir"
+    return 1
+}
+
+# Re-point chrony at a domain time source. Called post-join / post-provision.
+# The prepare-image.sh skeleton has no NTP servers baked in (isolated-network
+# friendly), so this is where the deployment-specific source gets configured.
+configure_chrony_for_domain() {
+    local ntp_source="$1" subnet="${2:-}"
+    local conf="/etc/chrony/chrony.conf"
+
+    # Strip any prior sconfig-managed block
+    sed -i '/# --- sconfig-managed chrony ---/,/# --- end sconfig ---/d' "$conf" 2>/dev/null
+
+    cat >> "$conf" <<CHRONYEOF
+# --- sconfig-managed chrony ---
+server ${ntp_source} iburst
+$( [[ -n "$subnet" ]] && echo "allow ${subnet}" )
+# --- end sconfig ---
+CHRONYEOF
+    systemctl restart chrony 2>/dev/null || true
+    echo "[sconfig] chrony repointed at ${ntp_source}${subnet:+ (serving $subnet)}"
+}
+
+# Register this host's PTR in the target forest's reverse zone so Windows DC
+# KCC replication works. WS2016+ KCC treats a missing PTR as a DNS lookup
+# failure (8524) and refuses to add the replica link — see T3 findings.
+#
+#   Input:  $1 target DC (FQDN or IP, usually the source DC we joined from)
+#           $2 NetBIOS domain (for `${NETBIOS}\administrator`)
+#           $3 admin password
+#           $4 realm (DNS domain) — used to compose this host's FQDN
+#   Return: 0 on success, 1 on any failure (including zone not present).
+register_own_ptr() {
+    local target_dc="$1" netbios="$2" admin_pass="$3" realm="$4"
+    local my_ip my_fqdn reverse_zone reverse_name a b c d
+
+    my_ip=$(ip -4 addr show scope global | awk '/inet /{print $2}' | cut -d/ -f1 | head -1)
+    [[ -z "$my_ip" ]] && { echo "[sconfig] WARN: no IPv4 address — skipping PTR registration"; return 1; }
+    IFS='.' read -r a b c d <<< "$my_ip"
+    reverse_zone="${c}.${b}.${a}.in-addr.arpa"
+    reverse_name="$d"
+    my_fqdn="$(hostname -s).${realm,,}"
+
+    echo "[sconfig] registering PTR  ${reverse_name}.${reverse_zone}  →  ${my_fqdn}."
+    local out
+    if out=$(samba-tool dns add "$target_dc" "$reverse_zone" "$reverse_name" PTR "${my_fqdn}." \
+                -U"${netbios}\\administrator" --password="$admin_pass" 2>&1); then
+        echo "[sconfig] PTR registered on $target_dc"
+        return 0
+    fi
+    # idempotent: treat "already exists" as success
+    if grep -qiE "already exist|DNS_ERROR_RECORD_ALREADY_EXISTS" <<< "$out"; then
+        echo "[sconfig] PTR already present on $target_dc"
+        return 0
+    fi
+    # zone missing is the common cause on unconfigured labs — explain clearly
+    if grep -qiE "DNS_ERROR_ZONE_DOES_NOT_EXIST|WERR_DNS_ERROR_ZONE_DOES_NOT_EXIST" <<< "$out"; then
+        echo "[sconfig] WARN: reverse zone $reverse_zone does not exist on $target_dc"
+        echo "[sconfig]       Windows replication FROM this DC will fail (error 8524) until"
+        echo "[sconfig]       the forest admin creates the zone. Continuing anyway."
+        return 1
+    fi
+    echo "[sconfig] WARN: PTR registration failed:"
+    echo "$out" | sed 's/^/[ptr] /'
+    return 1
 }
 
 domain_provision_new() {
@@ -524,21 +670,32 @@ domain_join_dc() {
 
     yesno "Join as ADDITIONAL DC?\n\nRealm: $DC_REALM\nSource DC: $existing_dc" || return
 
+    # Auto-detect target forest functional level. Samba's default
+    # `ad dc functional level = 2008_R2` silently fails against any
+    # 2012+ forest with WERR_DS_INCOMPATIBLE_VERSION.
+    local fl_str
+    fl_str=$(probe_forest_fl "$existing_dc")
+
     rm -f /etc/samba/smb.conf
     systemctl stop samba-ad-dc 2>/dev/null || true
     write_krb5_conf "$DC_REALM"
     echo -e "search ${DC_REALM,,}\nnameserver ${existing_dc}" > /etc/resolv.conf
 
-    whiptail --infobox "Joining domain... This may take several minutes." 8 60
+    whiptail --infobox "Joining domain at FL=$fl_str... This may take several minutes." 8 60
 
     if samba-tool domain join "$DC_REALM" DC \
         --dns-backend=SAMBA_INTERNAL \
         --option="dns forwarder = $DC_DNS_FORWARDER" \
+        --option="ad dc functional level = $fl_str" \
         -U"${DC_NETBIOS}\\administrator" \
         --password="$DC_ADMIN_PASS" 2>&1 | tail -20; then
         apply_hardening_to_smb_conf
         post_provision_setup "$DC_REALM" "$DC_DNS_FORWARDER"
-        info "Joined as additional DC!\nRealm: $DC_REALM"
+        register_own_ptr "$existing_dc" "$DC_NETBIOS" "$DC_ADMIN_PASS" "$DC_REALM" || true
+        seed_sysvol "$existing_dc" "$DC_NETBIOS" "$DC_ADMIN_PASS" "$DC_REALM" || true
+        configure_chrony_for_domain "$existing_dc"
+        _generate_tls_cert_core
+        info "Joined as additional DC (FL=$fl_str)!\nRealm: $DC_REALM"
     else
         info "Join FAILED.\n\nCheck connectivity to $existing_dc and credentials."
     fi
@@ -554,21 +711,29 @@ domain_join_rodc() {
 
     yesno "Join as RODC?\n\nRealm: $DC_REALM\nSource DC: $existing_dc" || return
 
+    local fl_str
+    fl_str=$(probe_forest_fl "$existing_dc")
+
     rm -f /etc/samba/smb.conf
     systemctl stop samba-ad-dc 2>/dev/null || true
     write_krb5_conf "$DC_REALM"
     echo -e "search ${DC_REALM,,}\nnameserver ${existing_dc}" > /etc/resolv.conf
 
-    whiptail --infobox "Joining as RODC... This may take several minutes." 8 60
+    whiptail --infobox "Joining as RODC at FL=$fl_str..." 8 60
 
     if samba-tool domain join "$DC_REALM" RODC \
         --dns-backend=SAMBA_INTERNAL \
         --option="dns forwarder = $DC_DNS_FORWARDER" \
+        --option="ad dc functional level = $fl_str" \
         -U"${DC_NETBIOS}\\administrator" \
         --password="$DC_ADMIN_PASS" 2>&1 | tail -20; then
         apply_hardening_to_smb_conf
         post_provision_setup "$DC_REALM" "$DC_DNS_FORWARDER"
-        info "Joined as RODC!\nRealm: $DC_REALM"
+        register_own_ptr "$existing_dc" "$DC_NETBIOS" "$DC_ADMIN_PASS" "$DC_REALM" || true
+        seed_sysvol "$existing_dc" "$DC_NETBIOS" "$DC_ADMIN_PASS" "$DC_REALM" || true
+        configure_chrony_for_domain "$existing_dc"
+        _generate_tls_cert_core
+        info "Joined as RODC (FL=$fl_str)!\nRealm: $DC_REALM"
     else
         info "RODC join FAILED."
     fi
@@ -858,21 +1023,33 @@ disable_firewall() {
     info "Firewall disabled."
 }
 
-generate_tls_cert() {
-    is_provisioned || { info "Not provisioned."; return; }
-
-    local realm fqdn cert_dir
-    realm=$(get_realm); fqdn=$(get_fqdn)
+# Non-TUI core of TLS cert generation. Writes a self-signed cert with SAN
+# entries (DNS fqdn, short hostname, IPv4), installs `tls keyfile/certfile/cafile`
+# into smb.conf's [global] section, and restarts samba-ad-dc. Called from
+# both the TUI menu 5 and automatically after a successful join so the
+# appliance never advertises Samba's SAN-less auto-generated cert to clients.
+_generate_tls_cert_core() {
+    local realm fqdn shortname ip cert_dir
+    realm=$(get_realm)
+    fqdn=$(get_fqdn 2>/dev/null)
+    shortname=$(hostname -s)
+    # fallback compose if hostname -f is unreliable post-join
+    if [[ "$fqdn" == "(not set)" || -z "$fqdn" || "$fqdn" == "$shortname" ]]; then
+        fqdn="${shortname}.${realm,,}"
+    fi
+    ip=$(ip -4 addr show scope global | awk '/inet /{print $2}' | cut -d/ -f1 | head -1)
     cert_dir="/var/lib/samba/private/tls"
     mkdir -p "$cert_dir"
 
-    [[ -f "$cert_dir/cert.pem" ]] && ! yesno "Cert exists. Regenerate?" && return
-
-    whiptail --infobox "Generating TLS certificate..." 6 50
+    echo "[sconfig] generating TLS cert (CN=${fqdn}, SAN=DNS:${fqdn},DNS:${shortname},IP:${ip})"
     openssl req -x509 -nodes -days 3650 -newkey rsa:4096 \
         -keyout "$cert_dir/key.pem" -out "$cert_dir/cert.pem" \
         -subj "/CN=${fqdn}/O=${realm}" \
-        -addext "subjectAltName=DNS:${fqdn},DNS:*.${realm,,}" 2>/dev/null
+        -addext "subjectAltName=DNS:${fqdn},DNS:${shortname},IP:${ip}" \
+        -addext "basicConstraints=CA:FALSE" \
+        -addext "keyUsage=digitalSignature,keyEncipherment" \
+        -addext "extendedKeyUsage=serverAuth,clientAuth" \
+        2>/dev/null
 
     cp "$cert_dir/cert.pem" "$cert_dir/ca.pem"
     chmod 600 "$cert_dir/key.pem"
@@ -880,15 +1057,31 @@ generate_tls_cert() {
 
     local smb="/etc/samba/smb.conf"
     if ! grep -q 'tls keyfile' "$smb" 2>/dev/null; then
-        cat >> "$smb" << TLSEOF
-
-        tls keyfile = ${cert_dir}/key.pem
-        tls certfile = ${cert_dir}/cert.pem
-        tls cafile = ${cert_dir}/ca.pem
-TLSEOF
+        local tmp
+        tmp=$(mktemp)
+        awk -v cd="$cert_dir" '
+            BEGIN { ins=0 }
+            /^\[global\][[:space:]]*$/ && !ins {
+                print
+                print "\ttls keyfile = " cd "/key.pem"
+                print "\ttls certfile = " cd "/cert.pem"
+                print "\ttls cafile = " cd "/ca.pem"
+                ins=1; next
+            }
+            { print }
+        ' "$smb" > "$tmp" && mv "$tmp" "$smb"
     fi
 
-    systemctl restart samba-ad-dc
+    systemctl restart samba-ad-dc 2>/dev/null || true
+    echo "[sconfig] TLS cert installed"
+}
+
+generate_tls_cert() {
+    is_provisioned || { info "Not provisioned."; return; }
+    local cert_dir="/var/lib/samba/private/tls"
+    [[ -f "$cert_dir/cert.pem" ]] && ! yesno "Cert exists. Regenerate?" && return
+    whiptail --infobox "Generating TLS certificate..." 6 50
+    _generate_tls_cert_core
     info "TLS cert generated at ${cert_dir}/\nReplace with CA-signed cert for production."
 }
 
@@ -1090,7 +1283,78 @@ menu_power() {
 }
 
 #===============================================================================
+# HEADLESS CLI (testing / automation)
+#
+# The TUI is the primary UX. These subcommands mirror a subset of the TUI
+# operations for scripted verification (see test-results/ regression runs)
+# and so `run-tests.sh` can drive the appliance without `expect`.
+#===============================================================================
+cli_probe_fl() {
+    local dc="${1:?usage: samba-sconfig probe-fl <dc-fqdn-or-ip>}"
+    probe_forest_fl "$dc"
+}
+
+cli_join_dc() {
+    : "${SC_REALM:?SC_REALM env var required}"
+    : "${SC_NETBIOS:?SC_NETBIOS env var required}"
+    : "${SC_DC:?SC_DC env var required (target DC FQDN or IP)}"
+    : "${SC_PASS:?SC_PASS env var required}"
+    SC_FWD="${SC_FWD:-$SC_DC}"
+    SC_ROLE="${SC_ROLE:-DC}"   # DC or RODC
+
+    local DC_REALM="${SC_REALM^^}"
+    local DC_NETBIOS="${SC_NETBIOS^^}"
+    local DC_ADMIN_PASS="$SC_PASS"
+    local DC_DNS_FORWARDER="$SC_FWD"
+
+    local fl_str
+    fl_str=$(probe_forest_fl "$SC_DC")
+    echo "[sconfig] forest FL probe: $fl_str"
+
+    rm -f /etc/samba/smb.conf
+    systemctl stop samba-ad-dc 2>/dev/null || true
+    write_krb5_conf "$DC_REALM"
+    echo -e "search ${DC_REALM,,}\nnameserver ${SC_DC}" > /etc/resolv.conf
+
+    echo "[sconfig] joining $DC_REALM as $SC_ROLE via $SC_DC (FL=$fl_str)..."
+    if samba-tool domain join "$DC_REALM" "$SC_ROLE" \
+        --dns-backend=SAMBA_INTERNAL \
+        --option="dns forwarder = $DC_DNS_FORWARDER" \
+        --option="ad dc functional level = $fl_str" \
+        -U"${DC_NETBIOS}\\administrator" \
+        --password="$DC_ADMIN_PASS"; then
+        apply_hardening_to_smb_conf
+        post_provision_setup "$DC_REALM" "$DC_DNS_FORWARDER"
+        register_own_ptr "$SC_DC" "$DC_NETBIOS" "$DC_ADMIN_PASS" "$DC_REALM" || true
+        seed_sysvol "$SC_DC" "$DC_NETBIOS" "$DC_ADMIN_PASS" "$DC_REALM" || true
+        configure_chrony_for_domain "$SC_DC"
+        _generate_tls_cert_core
+        echo "[sconfig] JOIN SUCCESS (FL=$fl_str) — TLS cert has SAN, PTR registered, SYSVOL seeded"
+    else
+        local rc=$?
+        echo "[sconfig] JOIN FAILED (rc=$rc)" >&2
+        return "$rc"
+    fi
+}
+
+usage_cli() {
+    cat <<USAGE
+Usage: samba-sconfig                  # interactive TUI
+       samba-sconfig probe-fl <dc>    # print detected forest FL string
+       samba-sconfig join-dc          # headless join; env: SC_REALM, SC_NETBIOS,
+                                      # SC_DC, SC_PASS [SC_FWD] [SC_ROLE=DC|RODC]
+USAGE
+}
+
+#===============================================================================
 # ENTRY
 #===============================================================================
 check_root
-main_menu
+
+case "${1:-}" in
+    "")           main_menu ;;
+    probe-fl)     shift; cli_probe_fl "$@" ;;
+    join-dc)      cli_join_dc ;;
+    -h|--help)    usage_cli ;;
+    *)            echo "Unknown subcommand: $1" >&2; usage_cli >&2; exit 2 ;;
+esac

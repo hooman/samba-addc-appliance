@@ -113,7 +113,9 @@ apt-get install -y \
     rsync \
     bash-completion \
     locales-all \
-    whiptail
+    whiptail \
+    nftables \
+    ldap-utils
 
 #===============================================================================
 # 5. SAMBA AD DC PACKAGES
@@ -157,27 +159,23 @@ UAEOF
 #===============================================================================
 log "Installing Microsoft PowerShell..."
 
-curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | \
-    gpg --dearmor -o /usr/share/keyrings/microsoft-archive-keyring.gpg
-
-echo "deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft-archive-keyring.gpg] https://packages.microsoft.com/debian/13/prod trixie main" \
-    > /etc/apt/sources.list.d/microsoft.list
-
-apt-get update -y
-
 PWSH_INSTALLED=false
-if apt-get install -y powershell 2>/dev/null; then
-    PWSH_INSTALLED=true
-    log "PowerShell installed: $(pwsh --version 2>/dev/null)"
-else
-    warn "Repo install failed. Trying direct .deb download..."
-    PWSH_VER="7.6.0"
-    PWSH_DEB="powershell_${PWSH_VER}-1.deb_amd64.deb"
-    if wget -q "https://github.com/PowerShell/PowerShell/releases/download/v${PWSH_VER}/${PWSH_DEB}" -O "/tmp/${PWSH_DEB}"; then
-        dpkg -i "/tmp/${PWSH_DEB}" 2>/dev/null || true
-        apt-get install -f -y
-        rm -f "/tmp/${PWSH_DEB}"
-        command -v pwsh &>/dev/null && PWSH_INSTALLED=true
+
+# Debian 13 (Trixie) switched to `sqv` for apt signature verification, which
+# rejects Microsoft's current repo key (missing subkey EE4D7792F748182B). The
+# MS apt repo is therefore unusable on Trixie — install from GitHub .deb
+# instead. Clean up any stale repo file from prior runs.
+rm -f /etc/apt/sources.list.d/microsoft.list /usr/share/keyrings/microsoft-archive-keyring.gpg
+
+PWSH_VER="7.6.0"
+PWSH_DEB="powershell_${PWSH_VER}-1.deb_amd64.deb"
+if wget -q "https://github.com/PowerShell/PowerShell/releases/download/v${PWSH_VER}/${PWSH_DEB}" -O "/tmp/${PWSH_DEB}"; then
+    dpkg -i "/tmp/${PWSH_DEB}" 2>/dev/null || true
+    apt-get install -f -y
+    rm -f "/tmp/${PWSH_DEB}"
+    if command -v pwsh &>/dev/null; then
+        PWSH_INSTALLED=true
+        log "PowerShell installed: $(pwsh --version 2>/dev/null)"
     fi
 fi
 
@@ -228,10 +226,13 @@ fi
 #===============================================================================
 # 12. MASK SAMBA FILE-SERVER SERVICES
 #===============================================================================
-log "Stopping and masking Samba file-server services..."
+log "Stopping and disabling Samba services until samba-sconfig takes over..."
 systemctl stop samba winbind nmbd smbd samba-ad-dc 2>/dev/null || true
 systemctl disable samba winbind nmbd smbd samba-ad-dc 2>/dev/null || true
-systemctl mask samba winbind nmbd smbd 2>/dev/null || true
+# Mask only the file-server daemons. Do NOT mask samba.service itself — it is
+# an alias slot used by samba-ad-dc.service; masking it via /dev/null symlink
+# breaks `systemctl enable samba-ad-dc` after a join/provision.
+systemctl mask winbind nmbd smbd 2>/dev/null || true
 
 #===============================================================================
 # 13. REMOVE DEFAULT SMB.CONF
@@ -254,14 +255,19 @@ KRBEOF
 # 15. SKELETON CHRONY.CONF
 #===============================================================================
 log "Writing chrony skeleton..."
+# Deliberately no NTP servers here — samba-sconfig adds the correct source
+# (the domain controller being joined, or user-provided upstream) at deploy
+# time. Leaving internet pools baked in breaks isolated-network deployments
+# and, on AD networks, conflicts with the domain's authoritative time source.
 cat > /etc/chrony/chrony.conf << 'CHRONEOF'
-server time.cloudflare.com iburst
-server time.google.com iburst
-pool 2.debian.pool.ntp.org iburst
+# Time sources are configured per deployment by samba-sconfig.
+# Until sconfig runs, this host relies on the hypervisor time-sync service
+# (hyperv-daemons / vmware-tools / qemu-guest-agent) if present.
+
 driftfile /var/lib/chrony/drift
-#allow 192.168.0.0/16
 ntpsigndsocket /var/lib/samba/ntp_signd
 makestep 1.0 3
+#allow 192.168.0.0/16   # enabled by samba-sconfig after provision/join
 CHRONEOF
 
 #===============================================================================

@@ -23,3 +23,6 @@ Icon
 Network Trash Folder
 Temporary Items
 .apdisk
+
+# Claude Code workspace (local settings, scheduled task locks)
+.claude/
