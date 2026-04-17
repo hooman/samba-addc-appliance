@@ -733,15 +733,26 @@ register_own_ptr() {
     my_fqdn="$(hostname -s).${realm,,}"
 
     echo "[sconfig] registering PTR  ${reverse_name}.${reverse_zone}  →  ${my_fqdn}."
-    local out
+    local out ptr_ok=false
     if out=$(samba-tool dns add "$target_dc" "$reverse_zone" "$reverse_name" PTR "${my_fqdn}." \
                 -U"${netbios}\\administrator" --password="$admin_pass" 2>&1); then
         echo "[sconfig] PTR registered on $target_dc"
-        return 0
-    fi
-    # idempotent: treat "already exists" as success
-    if grep -qiE "already exist|DNS_ERROR_RECORD_ALREADY_EXISTS" <<< "$out"; then
+        ptr_ok=true
+    elif grep -qiE "already exist|DNS_ERROR_RECORD_ALREADY_EXISTS" <<< "$out"; then
         echo "[sconfig] PTR already present on $target_dc"
+        ptr_ok=true
+    fi
+
+    if $ptr_ok; then
+        # Force KCC on the source DC to re-evaluate the replica link now that
+        # PTR exists. Without this, the stale 8524 from the brief window
+        # between `samba-tool domain join` completing and the PTR being
+        # registered lingers in /showrepl /errorsonly for ~15 min until KCC's
+        # next scheduled run.
+        echo "[sconfig] forcing KCC on $target_dc to clear stale 8524..."
+        samba-tool drs kcc "$target_dc" \
+            -U"${netbios}\\administrator" --password="$admin_pass" 2>&1 \
+            | sed 's/^/[kcc] /' || true
         return 0
     fi
     # zone missing is the common cause on unconfigured labs — explain clearly

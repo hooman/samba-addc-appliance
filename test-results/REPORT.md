@@ -189,3 +189,66 @@ T4.4 LDAPS     PASS      10-yr cert w/ SAN (DNS fqdn, DNS shortname, IP) served 
 Scripts at `prepare-image.sh` + `samba-sconfig.sh` (repo root) now produce
 a clean first-try deployment. Next natural iteration: write `run-tests.sh`
 against the `samba-sconfig join-dc` CLI to make this regression reproducible.
+
+---
+
+## Lab v2 regression (2026-04-17) — realistic DHCP-NAT topology
+
+After the router-VM + fix-the-remaining-lab-script-bugs overhaul, the entire
+pipeline was rerun from scratch against the new lab:
+
+1. Router `router1` (Debian genericcloud + cloud-init) — one-shot build from
+   `lab/stage-router-artifacts.sh` + `lab/New-LabRouter.ps1`.
+2. WS2025-DC1 with the fixed FirstLogon (RunOnce phase 2 + DHCP-disable
+   before static IP) and corrected baseline link for Member Server GPO.
+3. Fresh Debian install on samba-dc1 (DHCP on Lab-NAT, no add/remove-NIC
+   dance), `prepare-image.sh` first-try clean, golden-image checkpointed.
+4. `samba-sconfig join-dc` (headless) end-to-end.
+
+### Additional fix uncovered by v2 regression — force KCC after PTR
+
+During the first v2 run, the fully-automated join+PTR flow still left
+WS2025 with stale 8524 errors in `repadmin /showrepl /errorsonly` (visible
+for ~15 min until the scheduled KCC pass) — even though replication itself
+was silently working (replsummary `0 / 5` both directions from the start,
+and `repadmin /replicate` succeeded once forced). Root cause: between
+`samba-tool domain join` completing and `register_own_ptr` registering
+the reverse record, there is a ~1-second window in which WS2025's KCC
+attempts the replica link, fails with 8524 (DNS lookup), caches that
+failure, and doesn't retry on its own schedule.
+
+**Fix**: after a successful PTR registration, sconfig now runs
+`samba-tool drs kcc <target_dc>` with the admin creds so the stale entry
+is discarded immediately. Verified clean: `/showrepl /errorsonly` reports
+"No errors" and `testuser-v2` (created on Samba) is visible via
+`Get-ADUser` on WS2025 within seconds of creation.
+
+### Result
+
+```
+[sconfig] forest FL probe: 2016
+[sconfig] joining LAB.TEST as DC via 10.10.10.10 (FL=2016)...
+[sconfig] registering PTR  20.10.10.10.in-addr.arpa  →  samba-dc1.lab.test.
+[sconfig] PTR registered on 10.10.10.10
+[sconfig] forcing KCC on 10.10.10.10 to clear stale 8524...
+[kcc] Consistency check on 10.10.10.10 successful.
+[sconfig] seeding SYSVOL from //10.10.10.10/sysvol/lab.test ...
+[sconfig] SYSVOL seeded. Resetting NTACLs...
+[sconfig] chrony repointed at 10.10.10.10
+[sconfig] generating TLS cert (CN=samba-dc1.lab.test, SAN=DNS:samba-dc1.lab.test,DNS:samba-dc1,IP:10.10.10.20)
+[sconfig] TLS cert installed
+[sconfig] JOIN SUCCESS (FL=2016) — TLS cert has SAN, PTR registered, SYSVOL seeded
+```
+
+Full capture in `test-results/regression-v2.log`. Same T1-T4 outcomes as
+the previous regression, plus:
+
+- **No add/remove-NIC dance at any step** — Debian install via DHCP on
+  Lab-NAT, prepare-image.sh runs with the Internet natively reachable.
+- **WS2025-DC1 rebuild fully automated** — FirstLogon Phase 1 + 2 auto-run
+  via RunOnce, zero manual console interventions needed (the "v1"
+  requirement to manually re-invoke Phase 2 is gone).
+- **Member Server baseline correctly linked** — `Apply-SecurityBaseline.ps1`
+  now uses exact DisplayName match (`Get-GPO -Name '…Member Server'`) so
+  the real Member Server policy lands on `OU=Lab/TestServers` instead of
+  its Credential Guard sibling.
