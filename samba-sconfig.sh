@@ -103,9 +103,80 @@ get_update_policy() {
 }
 
 #===============================================================================
+# FIRST-LAUNCH WIZARD
+#
+# Run once per image, right when the admin first opens sconfig on a freshly
+# prepared VM. Covers the tasks that are easy to forget and hard to recover
+# from later: check connectivity, offer updates, prompt to pin the DHCP lease
+# as a static IP before provisioning/joining a domain.
+#===============================================================================
+FIRST_BOOT_MARKER='/var/lib/samba-sconfig/first-boot-done'
+
+first_boot_wizard() {
+    [[ -f "$FIRST_BOOT_MARKER" ]] && return
+    mkdir -p "$(dirname "$FIRST_BOOT_MARKER")"
+
+    whiptail --title "Welcome to samba-sconfig" --msgbox \
+        "This looks like a freshly-prepared appliance image.\n\nThe first-launch wizard will offer to:\n  1. Check your internet connection\n  2. Install available updates\n  3. Pin the current DHCP lease as a static IP\n\nYou can skip any step and come back via the normal menus." \
+        14 64
+
+    # 1. Connectivity probe
+    if ping -c 1 -W 2 -q 1.1.1.1 &>/dev/null; then
+        whiptail --title "Connectivity" --msgbox \
+            "Internet reachable.\n\nGateway: $(get_gateway)\nDNS:     $(get_current_dns)" 10 60
+    else
+        whiptail --title "Connectivity" --msgbox \
+            "Cannot reach 1.1.1.1.\n\nThis lab expects DHCP from the router. Check that the VM is on the Lab-NAT switch and the router VM is up. Skipping update offer." 12 64
+        touch "$FIRST_BOOT_MARKER"
+        return
+    fi
+
+    # 2. Updates
+    if whiptail --title "System Updates" --yesno \
+        "Check for and install available updates now?\n\nThis runs 'apt update' and 'apt upgrade -y'. Takes 1-3 min on a clean image." 12 64; then
+        clear
+        echo "[sconfig] apt update..."
+        apt-get update
+        echo "[sconfig] apt upgrade..."
+        DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
+        echo "[sconfig] done — press Enter to continue"
+        read -r _
+    fi
+
+    # 3. Pin DHCP lease as static
+    local addr_source
+    addr_source=$(get_addr_source)
+    if [[ "$addr_source" == "dhcp" ]]; then
+        if whiptail --title "Network" --yesno \
+            "Interface is on DHCP ($(get_ip | cut -d/ -f1)).\n\nAn AD DC needs a stable IP. Pin the current lease as static now?" 12 64; then
+            local iface; iface=$(get_iface)
+            local ip mask gw dns
+            ip=$(get_ip | cut -d/ -f1); mask=$(get_ip | cut -d/ -f2)
+            gw=$(get_gateway); dns=$(get_current_dns)
+            cat > /etc/network/interfaces << NETEOF
+# Managed by samba-sconfig (first-boot pin)
+auto lo
+iface lo inet loopback
+
+auto ${iface}
+iface ${iface} inet static
+    address ${ip}/${mask}
+    gateway ${gw}
+NETEOF
+            printf "nameserver %s\n" "$dns" > /etc/resolv.conf
+            whiptail --title "Network" --msgbox \
+                "Static pin written:\n  ${ip}/${mask}\n  gw=${gw}  dns=${dns}\n\nEffective on next boot (or systemctl restart networking)." 12 64
+        fi
+    fi
+
+    touch "$FIRST_BOOT_MARKER"
+}
+
+#===============================================================================
 # MAIN MENU
 #===============================================================================
 main_menu() {
+    first_boot_wizard
     while true; do
         local hostname fqdn ip_addr dc_role realm_str
         hostname=$(get_hostname)
@@ -212,29 +283,85 @@ config_hostname() {
     info "Hostname set to: $new_hostname\nShort: $short_name\n\nReboot recommended."
 }
 
+get_addr_source() {
+    # Report whether the default interface currently has a DHCP lease,
+    # a static assignment, or nothing. Used by config_network to decide
+    # what to offer the user.
+    local iface="${1:-$(get_iface)}"
+    [[ -z "$iface" ]] && { echo none; return; }
+    if ip -4 addr show dev "$iface" 2>/dev/null | grep -q 'dynamic'; then
+        echo dhcp
+    elif ip -4 addr show dev "$iface" 2>/dev/null | grep -q 'inet '; then
+        echo static
+    else
+        echo none
+    fi
+}
+
+get_current_dns() {
+    # First non-comment nameserver in /etc/resolv.conf
+    awk '/^nameserver[[:space:]]/ { print $2; exit }' /etc/resolv.conf 2>/dev/null
+}
+
 config_network() {
     local iface
     iface=$(get_iface)
     [[ -z "$iface" ]] && { info "ERROR: No network interface detected."; return; }
 
-    local current_ip current_mask current_gw
+    local current_ip current_mask current_gw current_dns addr_source
     current_ip=$(get_ip | cut -d/ -f1)
     current_mask=$(get_ip | cut -d/ -f2)
     current_gw=$(get_gateway)
+    current_dns=$(get_current_dns)
+    addr_source=$(get_addr_source "$iface")
+
+    # If the host is currently on DHCP (typical first-boot state on lab-v2),
+    # offer the one-shot "pin the current lease as static" path as the most
+    # common path. An AD DC needs a stable IP; the lab's dnsmasq reservation
+    # keeps the lease stable, but static is the real-world expectation.
+    local mode
+    if [[ "$addr_source" == "dhcp" ]]; then
+        mode=$(whiptail --title "Network Configuration" \
+            --menu "Interface $iface is currently on DHCP.\n\nCurrent lease:\n  IP:  $current_ip/$current_mask\n  GW:  $current_gw\n  DNS: $current_dns\n\nAn AD DC needs a stable IP. Choose one:" \
+            $WT_HEIGHT $WT_WIDTH 6 \
+            "1" "Pin current DHCP lease as static (recommended)" \
+            "2" "Enter different static IP" \
+            "3" "Keep DHCP (not recommended for a DC)" \
+            "B" "Back" \
+            3>&1 1>&2 2>&3) || return
+    else
+        mode='2'   # already static (or none) — go straight to manual entry
+    fi
 
     local new_ip new_mask new_gw new_dns
-    new_ip=$(whiptail --inputbox "Interface: $iface\n\nStatic IP address:" \
-        10 60 "$current_ip" 3>&1 1>&2 2>&3) || return
-    new_mask=$(whiptail --inputbox "Subnet prefix length (e.g., 24):" \
-        10 60 "${current_mask:-24}" 3>&1 1>&2 2>&3) || return
-    new_gw=$(whiptail --inputbox "Default gateway:" \
-        10 60 "$current_gw" 3>&1 1>&2 2>&3) || return
-    new_dns=$(whiptail --inputbox "Upstream DNS (pre-domain; post-domain uses 127.0.0.1):" \
-        10 64 "1.1.1.1" 3>&1 1>&2 2>&3) || return
-
-    yesno "Apply?\n\nInterface: $iface\nIP: $new_ip/$new_mask\nGateway: $new_gw\nDNS: $new_dns" || return
+    case "$mode" in
+        1)
+            new_ip="$current_ip"
+            new_mask="${current_mask:-24}"
+            new_gw="$current_gw"
+            new_dns="${current_dns:-1.1.1.1}"
+            yesno "Pin as static?\n\nInterface: $iface\nIP: $new_ip/$new_mask\nGateway: $new_gw\nDNS: $new_dns" || return
+            ;;
+        2)
+            new_ip=$(whiptail --inputbox "Interface: $iface\n\nStatic IP address:" \
+                10 60 "$current_ip" 3>&1 1>&2 2>&3) || return
+            new_mask=$(whiptail --inputbox "Subnet prefix length (e.g., 24):" \
+                10 60 "${current_mask:-24}" 3>&1 1>&2 2>&3) || return
+            new_gw=$(whiptail --inputbox "Default gateway:" \
+                10 60 "$current_gw" 3>&1 1>&2 2>&3) || return
+            new_dns=$(whiptail --inputbox "Upstream DNS (used pre-domain; post-domain sconfig points at 127.0.0.1):" \
+                10 64 "${current_dns:-1.1.1.1}" 3>&1 1>&2 2>&3) || return
+            yesno "Apply static?\n\nInterface: $iface\nIP: $new_ip/$new_mask\nGateway: $new_gw\nDNS: $new_dns" || return
+            ;;
+        3)
+            info "Keeping DHCP. Make sure router has a reservation for this host."
+            return
+            ;;
+        *)  return ;;
+    esac
 
     cat > /etc/network/interfaces << NETEOF
+# Managed by samba-sconfig
 auto lo
 iface lo inet loopback
 
@@ -250,10 +377,10 @@ DNSEOF
 
     local fqdn short
     fqdn=$(get_fqdn); short=$(get_hostname)
-    sed -i "/\s${fqdn}\b/d" /etc/hosts 2>/dev/null || true
+    sed -i "/[[:space:]]${fqdn}\b/d" /etc/hosts 2>/dev/null || true
     echo "${new_ip}  ${fqdn}  ${short}" >> /etc/hosts
 
-    info "Network written. Reboot to apply."
+    info "Network written to /etc/network/interfaces.\nReboot (or 'systemctl restart networking') to apply."
 }
 
 config_timezone() { dpkg-reconfigure tzdata; }

@@ -1,429 +1,308 @@
-# HANDOFF.md — How to hand this project off to Claude Code
+# HANDOFF.md — How to hand this project off to Claude Code (lab v2)
 
-This is your personal checklist. Work through it in order. The whole setup
-takes about 45 minutes of your attention, most of it waiting while things
-install. Once Claude Code takes over, you mostly watch.
+This is your personal setup checklist. Work through it in order. The whole
+thing takes ~30 minutes of your attention, most of it waiting while things
+install or download. Once Claude Code takes over, you mostly watch.
 
 ## Mental model
 
 You have two categories of files:
 
-- **Project files** (CLAUDE.md, prepare-image.sh, samba-sconfig.sh, run-tests.sh, lab/\*) — these live in a **Git repo on your Mac**. Claude Code reads and edits them there.
-- **Lab files** (the `lab/*.ps1` scripts, ISOs, GPO ZIP) — these need to be **on the Hyper-V host**, accessible from the D:\ISO\ path. Claude Code runs them there via SSH.
+- **Project files** (CLAUDE.md, prepare-image.sh, samba-sconfig.sh, lab/\*) —
+  these live in a **Git repo on your Mac**. Claude Code reads and edits them
+  there.
+- **Lab files** (lab/\*.ps1 scripts, ISOs, base VHDX, seed ISO, GPO ZIP) —
+  these sit on the **Hyper-V host at D:\ISO\** (= /Volumes/ISO on your Mac).
+  Claude Code invokes them over SSH.
 
-Claude Code itself runs on your Mac, SSHs into the Hyper-V host when it
-needs to do hypervisor things, and SSHs into VMs (through the host as a
-jump host) when it needs to run Debian commands. You don't need to install
-anything on the Hyper-V host — PowerShell 7.6 and the modules are already
-there.
-
-Your job is: set up the project directory on your Mac, fill in a couple of
-placeholder values, seed the lab scripts onto the host via your ISO share,
-then start Claude Code with a clear instruction.
+Claude Code runs on your Mac, SSHs into the Hyper-V host (`nmadmin@server`)
+for hypervisor work, and SSHs into lab VMs through the host as a jump. You
+don't install anything on the Hyper-V host — PowerShell 7.6 and the Hyper-V
+module are already present.
 
 ---
 
 ## Prerequisites
 
-Check these **before** you start. If any fail, fix them first.
+Check these **before** starting. If any fail, fix first.
 
-### 1. Claude Code is installed on your Mac
+### 1. Claude Code installed on your Mac
 
 ```bash
 claude --version
 ```
 
-If it's not installed, install it following Anthropic's current docs. You'll
-also need to be signed in with your account.
-
-### 2. SSH to the Hyper-V host works without a password
+### 2. Passwordless SSH to the Hyper-V host
 
 ```bash
-ssh nmadmin@__YOUR_HOST__ 'hostname'
+ssh nmadmin@server 'hostname'
 ```
 
-This should return the host's hostname immediately, no password prompt.
-If it prompts for a password, fix your SSH key setup before continuing.
-Claude Code needs non-interactive SSH.
+Should return the host's hostname instantly — no password prompt.
 
-### 3. The ISO share is mounted and writable
+### 3. `/Volumes/ISO/` mounted (= `D:\ISO\` on host) and writable
 
 ```bash
 ls /Volumes/ISO/
-touch /Volumes/ISO/.write-test && rm /Volumes/ISO/.write-test && echo "writable"
+touch /Volumes/ISO/.write-test && rm /Volumes/ISO/.write-test && echo writable
 ```
 
-You should see the three ISOs and the ZIP. The write test should print
-"writable". If it doesn't, remount the share with write permissions.
-
-### 4. The ISOs are all there
+### 4. Tools on the Mac
 
 ```bash
-ls /Volumes/ISO/ | grep -E '(debian-13.4.0|SERVER_EVAL|Security-Baseline)'
+which qemu-img hdiutil curl
 ```
 
-You should see three matches.
+All three required. `qemu-img` via `brew install qemu` if missing. `hdiutil`
+and `curl` are built-in on macOS.
+
+### 5. ISOs and base VHDX staged on `/Volumes/ISO/`
+
+These are ~2 GB total and you only stage them **once** (they persist across
+lab rebuilds). See "Step 1 — Stage lab artifacts" below.
 
 ---
 
-## Step 1 — Create the project directory on your Mac
+## Step 1 — Stage lab artifacts (one-time)
 
-Pick a place for the repo. Somewhere under your usual development folder
-makes sense. I'll use `~/Developer/samba-addc-appliance` as an example —
-substitute your own.
+Most of these are the same as v1; the additions are the **Debian cloud image**
+and the **NoCloud seed ISO** for the router VM.
+
+### 1a. Source ISOs (same as v1)
+
+You should already have these on `/Volumes/ISO/`. If not:
+
+```
+debian-13.4.0-amd64-netinst.iso                                      ~650 MB
+26100.32230.260111-0550.lt_release_svc_refresh_SERVER_EVAL_x64FRE_en-us.iso
+WS2025-2602-Security-Baseline.zip
+```
+
+### 1b. Build the router base VHDX
 
 ```bash
-mkdir -p ~/Developer/samba-addc-appliance
-cd ~/Developer/samba-addc-appliance
-git init
+cd /Volumes/ISO
+curl -sSL -O https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2
+
+# qemu-img can't lock on SMB; copy to local first
+cp debian-13-genericcloud-amd64.qcow2 /tmp/debian-router.qcow2
+qemu-img convert -p -O vhdx -o subformat=dynamic \
+    /tmp/debian-router.qcow2 /tmp/debian-router-base.vhdx
+cp /tmp/debian-router-base.vhdx /Volumes/ISO/debian-13-router-base.vhdx
+rm -f /tmp/debian-router-base.vhdx /tmp/debian-router.qcow2
+
+ls -lh /Volumes/ISO/debian-13-router-base.vhdx   # ~1.2 GB
 ```
 
-Now copy in all the files I delivered:
+### 1c. Build the router's cloud-init seed ISO
+
+The cloud-init files (`user-data`, `meta-data`, `network-config`) live in
+`lab/seed/` in the repo. Build the ISO once:
 
 ```bash
-# Replace the path below with wherever you saved the files from Claude
-DELIVERED=/path/to/downloaded/files
+cd ~/Developer/samba-addc-appliance   # wherever your repo lives
+mkdir -p /tmp/seed-router
+cp lab/seed/* /tmp/seed-router/
 
-cp "$DELIVERED/CLAUDE.md"          .
-cp "$DELIVERED/HANDOFF.md"         .
-cp "$DELIVERED/prepare-image.sh"   .
-cp "$DELIVERED/samba-sconfig.sh"   .
-chmod +x prepare-image.sh samba-sconfig.sh
+# IMPORTANT: edit lab/seed/user-data to include YOUR ssh-ed25519 public key
+#   (ssh_authorized_keys section). The committed version has the author's key.
 
-mkdir lab
-cp "$DELIVERED/lab/"*              lab/
+hdiutil makehybrid -iso -joliet -default-volume-name CIDATA \
+    -o /Volumes/ISO/router1-seed.iso /tmp/seed-router/
+ls -lh /Volumes/ISO/router1-seed.iso   # ~1 MB
+rm -rf /tmp/seed-router
 ```
 
-Verify the layout:
-
-```bash
-tree . || ls -R
-```
-
-You should see:
-
-```
-.
-├── CLAUDE.md
-├── HANDOFF.md
-├── prepare-image.sh
-├── samba-sconfig.sh
-└── lab
-    ├── Apply-SecurityBaseline.ps1
-    ├── FirstLogon-PromoteToDC.ps1
-    ├── New-SambaTestVM.ps1
-    ├── New-WS2025Lab.ps1
-    └── unattend-ws2025-core.xml
-```
-
-Commit to git so you can track Claude Code's changes:
-
-```bash
-git add -A
-git commit -m "Initial scaffolding from Claude"
-```
-
----
-
-## Step 2 — Fill in the host-specific values
-
-Only one placeholder needs changing: `__HYPERV_HOST__` in CLAUDE.md. This
-appears in several places — replace them all with your Hyper-V host's SSH
-target (hostname or IP).
-
-```bash
-# Replace YOURHOST with your actual host name or IP
-sed -i '' 's/__HYPERV_HOST__/YOURHOST/g' CLAUDE.md
-```
-
-(The `-i ''` is macOS sed syntax — it edits in place with an empty backup
-suffix.)
-
-Verify no placeholders remain:
-
-```bash
-grep -n '__HYPERV_HOST__' CLAUDE.md
-# (should print nothing)
-```
-
-If you want non-default lab values (different IP range, different admin
-password, different domain name), also edit the parameter defaults at the
-top of `lab/New-WS2025Lab.ps1` and `lab/FirstLogon-PromoteToDC.ps1`. The
-defaults are:
-
-- Lab network: `172.22.0.0/24`
-- Host vNIC: `172.22.0.1`
-- WS2025 DC: `172.22.0.10`
-- Admin password: `P@ssword123456!`
-- Domain: `lab.test` / `LAB`
-
-> ⚠️ If you change the password or network, also update the matching values
-> inside CLAUDE.md so Claude Code uses the right ones.
-
-Commit any edits:
-
-```bash
-git add -A
-git commit -m "Environment-specific values"
-```
-
----
-
-## Step 3 — Seed the lab scripts onto the Hyper-V host
-
-Claude Code will invoke these scripts via SSH, so they need to live in a
-stable path on the host. Copy them via your ISO share.
+### 1d. Copy lab/ scripts to the host
 
 ```bash
 mkdir -p /Volumes/ISO/lab-scripts
-cp lab/* /Volumes/ISO/lab-scripts/
-ls /Volumes/ISO/lab-scripts/
+cp lab/*.ps1 lab/*.xml /Volumes/ISO/lab-scripts/
 ```
 
-On the Hyper-V host, these files now appear at `D:\ISO\lab-scripts\`. You
-can verify:
+You repeat this copy any time you edit a lab/\*.ps1 file in the repo.
+
+---
+
+## Step 2 — Build the lab
+
+Claude Code can do this for you once the artifacts are staged. If you want
+to run it yourself first to verify, these are the commands:
 
 ```bash
-ssh nmadmin@YOURHOST 'Get-ChildItem D:\ISO\lab-scripts\ | Format-Table Name,Length'
+# Router (takes ~3 min — cloud-init installs packages and starts services)
+ssh nmadmin@server 'pwsh -File D:\ISO\lab-scripts\New-LabRouter.ps1'
+
+# Verify router is alive and NAT works
+ssh -J nmadmin@server hm@10.10.10.1 'cat /var/log/router-ready.marker; \
+    sudo nft list table ip nat'
+
+# WS2025 DC (takes ~10-15 min for install + promotion + phase-2)
+ssh nmadmin@server 'pwsh -File D:\ISO\lab-scripts\New-WS2025Lab.ps1'
+ssh nmadmin@server 'pwsh -File D:\ISO\lab-scripts\Wait-DCReady.ps1'
+
+# Security baseline (takes ~2 min)
+ssh nmadmin@server 'pwsh -File D:\ISO\lab-scripts\Apply-SecurityBaseline.ps1'
 ```
 
-You should see all five files.
+The router and WS2025-DC1 are meant to persist across sessions — build them
+once, keep them running, reuse.
 
 ---
 
-## Step 4 — Launch Claude Code
-
-From the project root:
+## Step 3 — Create the Samba test VM
 
 ```bash
-cd ~/Developer/samba-addc-appliance
-claude
+ssh nmadmin@server 'pwsh -File D:\ISO\lab-scripts\New-SambaTestVM.ps1 \
+    -VMName samba-dc1 -Start'
 ```
 
-Claude Code will open in interactive mode. Your **first prompt** should
-tell it to read the instructions and do the one-time lab build:
+The VM boots from the Debian netinst ISO. **You install manually.** During
+install:
 
-> Read CLAUDE.md carefully. Then run the one-time lab setup: build the
-> WS2025 DC VM and apply the security baseline. This is the persistent
-> infrastructure — build it once. Stop before creating the Samba test VM,
-> because the Debian install needs to be done manually. Monitor the lab
-> build progress and tell me when it's complete and the baseline is
-> applied.
+- Hostname: `samba-dc1`
+- Domain: leave blank (domain is configured later by sconfig)
+- Network: **DHCP** (router1's dnsmasq reserves `10.10.10.20` for the pinned
+  MAC)
+- Set a strong root password — you only use it at the console once, to
+  finish the sudo + SSH key setup below
+- Create the `debadmin` user with a throwaway password
+- At "software selection", pick **only** "SSH server" and "standard system
+  utilities"
 
-Claude Code will:
+When the installer reboots into the installed system, **log in at the
+console as root** and run:
 
-1. Read CLAUDE.md
-2. Run the health check (will show everything is missing — that's fine
-   for first run)
-3. Execute `New-WS2025Lab.ps1` on the host via SSH
-4. Wait for the DC to finish its first-logon script (watch for
-   `setup-complete.marker`)
-5. Execute `Apply-SecurityBaseline.ps1`
-6. Report back
-
-**Expected timing:** 15 minutes for the DC VM to build and promote,
-another 2–3 minutes for the baseline import. Claude Code will show you
-progress in real time.
-
-If anything fails, Claude Code will stop and tell you. You can respond
-with "try again" or "show me the log from X" — it'll work through it.
-
----
-
-## Step 5 — Manual Debian install (one-time)
-
-This is the one step that isn't automated. You have to open a console
-window and click through the Debian installer. It takes about 5 minutes.
-
-Tell Claude Code:
-
-> The lab is built. Now create the Samba test VM with New-SambaTestVM.ps1.
-> Once it's running, I'll do the Debian install manually via vmconnect.
-> Tell me when to start.
-
-Claude Code runs:
-
-```powershell
-pwsh -File D:\ISO\lab-scripts\New-SambaTestVM.ps1 -VMName samba-dc1 -Start
+```
+apt update && apt install -y sudo
+echo 'debadmin ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/debadmin
+chmod 440 /etc/sudoers.d/debadmin
+mkdir -p /home/debadmin/.ssh
+chmod 700 /home/debadmin/.ssh
 ```
 
-When Claude Code tells you the VM is running, open a Remote Desktop or
-Console session to the Hyper-V host and run:
+Now paste your Mac's ssh-ed25519 public key into
+`/home/debadmin/.ssh/authorized_keys`:
 
-```powershell
-vmconnect localhost samba-dc1
+```
+cat > /home/debadmin/.ssh/authorized_keys
+<paste your key — one line — then Ctrl-D>
 ```
 
-Then install Debian with these choices:
+```
+chown -R debadmin:debadmin /home/debadmin/.ssh
+chmod 600 /home/debadmin/.ssh/authorized_keys
+```
 
-- **Language / Locale / Keyboard:** your preference
-- **Hostname:** `samba-dc1`
-- **Domain name:** (leave blank)
-- **Root password:** pick one and remember it (this is the root password
-  for the Debian VM; it's not the domain admin password)
-- **No regular user:** when prompted to create a non-root user, use the
-  same password or leave it empty. It doesn't matter — you won't use it.
-- **Network:** configure manually, not DHCP:
-  - IP: `172.22.0.20`
-  - Netmask: `255.255.255.0`
-  - Gateway: `172.22.0.1`
-  - DNS: `1.1.1.1` (temporary — you'll switch to the WS2025 DC later)
-- **Partitioning:** guided, use entire disk, all in one partition
-- **Software selection:** uncheck desktop; keep **SSH server** and
-  **standard system utilities**. Everything else off.
-- **GRUB:** install to the disk
-
-Reboot. Debian comes up with SSH listening on 172.22.0.20.
-
-> 💡 The internal switch has no internet route. During install, you'll
-> need an external NIC attached temporarily. Either attach it before
-> starting the install, or if the mirror step fails, attach it then retry.
-> Claude Code can attach/detach this NIC for you — just ask.
-
-Back in Claude Code:
-
-> Debian is installed. The VM has IP 172.22.0.20. Please verify SSH works,
-> then run prepare-image.sh and checkpoint the VM as 'golden-image'. If
-> the VM doesn't have internet access for apt, temporarily add an external
-> NIC.
-
-Claude Code will SSH in, copy the scripts, run `prepare-image.sh` (takes
-~5 minutes), shut down the VM, and create the Hyper-V checkpoint.
-
----
-
-## Step 6 — Run the automated test cycles
-
-Now the fun part. Tell Claude Code:
-
-> Run all three test scenarios using the automated test runner approach
-> described in CLAUDE.md. For each scenario: revert samba-dc1 to the
-> golden-image checkpoint, execute the scenario, capture the log, and
-> verify success. Show me a summary at the end.
-
-Claude Code will cycle through:
-
-1. **Scenario 1** — standalone new forest (samba-tool domain provision)
-2. **Scenario 2** — join the WS2025 domain as additional DC
-3. **Scenario 3** — join as RODC
-
-Each scenario takes 2–5 minutes. Total: ~15 minutes for all three.
-
-Watch the output. Scenario 2 is the most likely to surface real issues —
-that's where you're exercising the interaction between Samba and the
-hardened WS2025 domain.
-
----
-
-## Iterative development loop
-
-From here on, the loop is:
-
-1. You or Claude Code finds a bug in `prepare-image.sh` or
-   `samba-sconfig.sh`
-2. Claude Code edits the file in the repo
-3. Claude Code SCPs the updated file to the VM (the right path depends
-   on which script — CLAUDE.md has the details)
-4. Claude Code reverts to golden-image, re-tests
-5. Commit changes when a test passes
-
-If you need to modify `prepare-image.sh` specifically, the checkpoint is
-no longer valid (because it captured a state created by the old version).
-You'll need to redo Step 5 — attach external NIC, re-run prepare-image,
-re-checkpoint. Claude Code can do this but it's not instant.
-
-`samba-sconfig.sh` changes don't invalidate the checkpoint — just revert,
-SCP the new file, and test.
-
----
-
-## What to do at the end of a session
-
-Before you close Claude Code:
-
-> Put the test VM back to golden-image state and power it off. Verify the
-> WS2025 DC is still running. Commit any script changes to git with
-> descriptive messages.
-
-Check the Hyper-V host state afterwards:
+Verify from your Mac:
 
 ```bash
-ssh nmadmin@YOURHOST 'Get-VM | Format-Table Name,State,Uptime'
+ssh -J nmadmin@server debadmin@10.10.10.20 'sudo -n true && echo OK'
 ```
 
-You want to see:
-
-- `WS2025-DC1` — **Running** (this should NEVER be Off at end of session
-  unless you explicitly took it down)
-- `samba-dc1` — Off (or whatever state you left it in)
-
-And your git log should show what changed:
+Should print `OK`. Then remove the install DVD:
 
 ```bash
-cd ~/Developer/samba-addc-appliance
-git log --oneline
+ssh nmadmin@server 'Set-VMDvdDrive -VMName samba-dc1 -Path $null'
 ```
+
+At this point the VM is ready and Claude Code can take over. Tell it
+something like:
+
+> "Debian is installed on samba-dc1 with debadmin passwordless sudo + SSH
+> key. The VM is on 10.10.10.20 via DHCP. Please run prepare-image.sh,
+> checkpoint as golden-image, then validate T1-T4 with the headless sconfig
+> CLI and report."
 
 ---
 
 ## Troubleshooting
 
-**Claude Code can't SSH to the host.** Test from your terminal first:
-`ssh nmadmin@YOURHOST 'hostname'`. If that doesn't work silently, fix the
-SSH key setup before Claude Code can help. Common cause: key not in
-agent — try `ssh-add ~/.ssh/id_ed25519`.
+### Router VM doesn't come up
 
-**The DC build hangs forever.** Check the VM state on the host:
-```powershell
-Get-VM WS2025-DC1 | Format-List State,Uptime
+Cloud-init takes 2-3 min on first boot. If after 5 min `ssh -J nmadmin@server
+hm@10.10.10.1` still fails:
+
+- `ssh nmadmin@server '(Get-VM router1).State'` — is it running?
+- `ssh nmadmin@server '(Get-VMNetworkAdapter -VMName router1).IPAddresses'` —
+  is the LAN NIC reporting an IP?
+- If not, cloud-init may have failed. `vmconnect localhost router1`, log in
+  as `hm` (no password — key-only), `sudo journalctl -u cloud-init`.
+
+### WS2025 `Wait-DCReady.ps1` times out
+
+Check phase state:
+
+```bash
+ssh nmadmin@server 'pwsh -File D:\ISO\lab-scripts\Diag-WS2025.ps1'
 ```
-If state is Running but nothing's happening, open vmconnect and see what
-screen it's on. Most likely: OOBE got stuck on a prompt that the unattend
-didn't cover. Fix: destroy the VM, fix the unattend, rebuild.
 
-**"PowerShell Direct failed" errors.** The VM needs to finish booting and
-the Integration Services to start. Wait longer (60+ seconds after VM
-starts), or check `Get-VMIntegrationService` for the VM.
+Common states:
+- Phase 1 stuck at "Using adapter: Ethernet" → an early bug in
+  FirstLogon-PromoteToDC.ps1 that's since fixed (Set-NetIPInterface -Dhcp
+  Disabled before IP removal). If you see this on an old script, re-stage
+  `lab/FirstLogon-PromoteToDC.ps1` to `D:\ISO\lab-scripts\`, rebuild the
+  VM.
+- Phase 2 RunOnce never fires → autologon consumed all 2 counts without
+  triggering phase 2. Manually re-invoke:
+  `ssh nmadmin@server 'pwsh -File D:\ISO\lab-scripts\Run-Phase2.ps1'`
 
-**Baseline import fails with "cannot find MapGuidsToGpoNames.ps1".** This
-is a known issue with Baseline-ADImport.ps1 — the script expects
-to be run from its own directory. `Apply-SecurityBaseline.ps1` handles
-this with `Push-Location`, but if the ZIP structure is different than
-expected, you may need to tweak the path discovery logic.
+### VM doesn't get DHCP from the router
 
-**Debian install can't find mirror.** The internal switch has no NAT.
-Either enable ICS on the host (one-time setup, then this goes away), or
-attach an external NIC temporarily. Claude Code can do either.
+Check dnsmasq on the router:
 
-**The Samba VM joins WS2025 but replication fails.** Most common cause
-is the WS2025 security baseline requiring LDAP signing or channel
-binding. Fix is in the Samba smb.conf — `samba-sconfig` menu 5 applies
-the necessary hardening. If the join itself fails with `LDAP_STRONG_AUTH
-_REQUIRED`, generate a TLS cert via sconfig first, then retry the join.
-
-**Everything goes sideways and you want to start fresh.** The lab infra
-is rebuildable. On the host:
-```powershell
-Stop-VM WS2025-DC1 -Force
-Remove-VM WS2025-DC1 -Force
-Remove-Item D:\Lab\WS2025-DC1 -Recurse -Force
-Get-VMSwitch Lab-Internal | Remove-VMSwitch -Force
+```bash
+ssh -J nmadmin@server hm@10.10.10.1 'sudo cat /var/lib/misc/dnsmasq.leases; \
+    sudo journalctl -u dnsmasq -n 50'
 ```
-Then re-run `New-WS2025Lab.ps1` and `Apply-SecurityBaseline.ps1`.
+
+The VM must have its MAC pinned to match a reservation in
+`/etc/dnsmasq.d/lab.conf`. If you're adding a new test VM, add its MAC to
+the reservations (or let it get a dynamic lease).
+
+### Rebuild the router from scratch
+
+```bash
+ssh nmadmin@server 'Stop-VM router1 -Force -ErrorAction SilentlyContinue; \
+    Remove-VM router1 -Force; Remove-Item D:\Lab\router1 -Recurse -Force'
+ssh nmadmin@server 'pwsh -File D:\ISO\lab-scripts\New-LabRouter.ps1'
+```
+
+Takes ~5 min since the base VHDX is already on `D:\ISO\`.
+
+### Rebuild the whole lab from scratch
+
+```bash
+ssh nmadmin@server 'Stop-VM samba-dc1,WS2025-DC1,router1 -Force -ErrorAction SilentlyContinue; \
+    Remove-VM samba-dc1,WS2025-DC1,router1 -Force; \
+    Remove-VMSwitch Lab-NAT -Force -ErrorAction SilentlyContinue; \
+    Remove-Item D:\Lab -Recurse -Force'
+```
+
+Then re-run Step 2 and Step 3 above.
 
 ---
 
-## A note on expectations
+## File map
 
-This is a first integration. The scripts are tested in design but they
-haven't run end-to-end against your specific environment yet. Expect
-something to not work the first time — probably a path, a permission, or
-an edge case in the unattend file. Claude Code is well-suited to working
-through these; let it iterate.
-
-If you hit something I didn't anticipate, paste the error into Claude
-Code along with relevant context, and let it propose a fix. If it
-proposes something that feels off to you, push back and ask for the
-alternative approach — same as you'd do with a junior engineer. Your
-instincts on IT infrastructure will be right more often than Claude
-Code's first suggestion.
+```
+Repo root
+├── CLAUDE.md            Claude Code's operational reference (deep lab details)
+├── HANDOFF.md           This file (user-facing setup)
+├── prepare-image.sh     Debian image prep (installs Samba, pwsh, nftables, etc.)
+├── samba-sconfig.sh     whiptail TUI + headless CLI for deployment config
+├── .gitignore
+├── lab/
+│   ├── New-LabRouter.ps1            build router1
+│   ├── New-WS2025Lab.ps1            build WS2025-DC1
+│   ├── FirstLogon-PromoteToDC.ps1   promotion script (phases via RunOnce)
+│   ├── unattend-ws2025-core.xml     Panther unattend
+│   ├── Apply-SecurityBaseline.ps1   import + link baseline GPOs
+│   ├── New-SambaTestVM.ps1          create the Debian test VM
+│   ├── Wait-DCReady.ps1             poll setup-complete.marker
+│   └── seed/                        cloud-init user-data for router1
+│       ├── user-data
+│       ├── meta-data
+│       └── network-config
+└── test-results/                    Claude Code's test artifacts + diagrams
+```

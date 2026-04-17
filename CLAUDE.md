@@ -1,362 +1,340 @@
-# CLAUDE.md — Samba AD DC Appliance Test Environment (Hyper-V Lab)
+# CLAUDE.md — Samba AD DC Appliance Test Environment (Hyper-V Lab, v2)
 
 ## Mission
 
 Build and test a **Samba Active Directory Domain Controller appliance** on
-Debian 13 (Trixie). Deliverables are two scripts in the repo root:
+Debian 13 (Trixie). Deliverables in the repo root:
 
-- `prepare-image.sh` — one-time Debian image prep
-- `samba-sconfig.sh` — whiptail TUI for deployment config
+- `prepare-image.sh` — one-time Debian image prep (installs Samba, pwsh,
+  nftables, ldap-utils, chrony skeleton; masks file-server services)
+- `samba-sconfig.sh` — whiptail TUI for deployment config (provision /
+  join / RODC / harden / diagnose)
 
-You (Claude Code) have a Hyper-V lab to test these against. The lab includes a
-**Windows Server 2025 Domain Controller** with the **WS2025 Security Baseline**
-applied — this is the realistic target environment for a Samba DC to join.
+You (Claude Code) drive a Hyper-V lab from the Mac. The lab models a realistic
+network: the VM under test **boots onto a DHCP-served LAN with internet
+reachable**, exactly like a real appliance deployment. The WS2025 forest with
+baseline applied sits on the same LAN (or not, depending on test scenario).
 
-Your job: deploy the scripts to Debian test VMs, verify they work, test the
-three main scenarios (new forest, additional DC in WS2025 domain, RODC), and
-iterate on fixes. **Do not tear down the lab infrastructure** — the WS2025 DC
-and internal switch persist. Only test VMs should be rebuilt.
-
----
-
-## Environment
+## Lab topology — v2
 
 ```
-┌────────────────────────────────────────────────────────────────┐
-│ Mac (Claude Code runs here)                                    │
-│  ~/.ssh key for nmadmin@server                                 │
-│  /Volumes/ISO  →  D:\ISO\ on host  (for file transfer)         │
-│                                                                │
-│  ssh nmadmin@server   (lands in PowerShell 7.6)                │
-│  ssh -J nmadmin@server root@172.22.0.X   (to VMs)              │
-└────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────┐
+│ Mac (Claude Code runs here)                                              │
+│  ~/.ssh/id_ed25519 — key-based SSH to:                                   │
+│    - nmadmin@server  (Hyper-V host, PowerShell 7.6)                      │
+│    - hm@10.10.10.1   (router1, via jump host)                            │
+│    - debadmin@10.10.10.N (any lab VM, via jump host)                     │
+│                                                                          │
+│  /Volumes/ISO = D:\ISO\ on host (file transfer)                          │
+└──────────────────────────────────────────────────────────────────────────┘
          │
-         ▼
-┌────────────────────────────────────────────────────────────────┐
-│ Hyper-V Host: server   (shell: PowerShell 7.6)                 │
-│   User: nmadmin  (admin; key-based SSH, no password)           │
-│   D:\ISO\      — ISO library (= /Volumes/ISO on Mac)           │
-│   D:\Lab\      — VM files                                      │
-│                                                                │
-│   Pre-loaded modules: Hyper-V, ActiveDirectory                 │
-│                                                                │
-│   ┌──────────────────────────────────────────────────────┐     │
-│   │  Internal Switch: "Lab-Internal"  (172.22.0.0/24)    │     │
-│   │  Host vNIC: 172.22.0.1                               │     │
-│   │                                                      │     │
-│   │  ┌────────────────┐    ┌────────────────┐            │     │
-│   │  │ WS2025-DC1     │    │ samba-dc1      │            │     │
-│   │  │ 172.22.0.10    │    │ 172.22.0.20    │            │     │
-│   │  │ lab.test / LAB │    │ Debian 13      │            │     │
-│   │  │ (persistent)   │    │ (test VM)      │            │     │
-│   │  └────────────────┘    └────────────────┘            │     │
-│   └──────────────────────────────────────────────────────┘     │
-└────────────────────────────────────────────────────────────────┘
+         ▼ ssh nmadmin@server
+┌──────────────────────────────────────────────────────────────────────────┐
+│ Hyper-V host: server   (Windows Server 2025, PowerShell 7.6, Hyper-V)    │
+│                                                                          │
+│  Switches:                                                               │
+│    PCI 1G Port 1    External — WAN to real network                       │
+│    Lab-NAT          Internal — 10.10.10.0/24 (new in v2)                 │
+│                                                                          │
+│  ┌─────────────────────────────────────────────────────────────────┐     │
+│  │  PCI 1G Port 1 (external)                    ───► Internet      │     │
+│  │    │                                                            │     │
+│  │    │ WAN (eth0, DHCP from real network)                         │     │
+│  │    ▼                                                            │     │
+│  │  ┌────────────────────────┐                                     │     │
+│  │  │ router1                │                                     │     │
+│  │  │   Debian genericcloud  │   nftables masquerade (NAT)         │     │
+│  │  │   cloud-init configured│   dnsmasq (DHCP + DNS forwarder)    │     │
+│  │  └─────┬──────────────────┘                                     │     │
+│  │        │ LAN (eth1, 10.10.10.1/24)                              │     │
+│  │        │                                                        │     │
+│  │  ┌─────▼──────────────────────────────────────────────────┐     │     │
+│  │  │  Lab-NAT (internal) — 10.10.10.0/24                    │     │     │
+│  │  │                                                        │     │     │
+│  │  │  host vNIC           10.10.10.X  (via DHCP)            │     │     │
+│  │  │                                                        │     │     │
+│  │  │  ┌────────────────┐       ┌────────────────┐           │     │     │
+│  │  │  │ WS2025-DC1     │       │ samba-dc1      │           │     │     │
+│  │  │  │ 10.10.10.10    │       │ 10.10.10.20    │           │     │     │
+│  │  │  │ lab.test/LAB   │       │ Debian 13      │           │     │     │
+│  │  │  │ baseline GPOs  │       │ samba-sconfig  │           │     │     │
+│  │  │  └────────────────┘       └────────────────┘           │     │     │
+│  │  │                                                        │     │     │
+│  │  │  DHCP dynamic pool: 10.10.10.100-200                   │     │     │
+│  │  │  Reservations (dnsmasq on router1):                    │     │     │
+│  │  │    00:15:5D:0A:0A:0A  -> WS2025-DC1  10.10.10.10       │     │     │
+│  │  │    00:15:5D:0A:0A:14  -> samba-dc1   10.10.10.20       │     │     │
+│  │  └────────────────────────────────────────────────────────┘     │     │
+│  └─────────────────────────────────────────────────────────────────┘     │
+└──────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Lab network plan
+### Addressing
 
-| Role | Hostname | IP | Purpose |
-|------|----------|------|---------|
-| Hyper-V host (vNIC) | — | 172.22.0.1 | Gateway + jump host |
-| WS2025 DC (first) | ws2025-dc1 | 172.22.0.10 | lab.test forest root |
-| Samba test VM 1 | samba-dc1 | 172.22.0.20 | Primary test VM |
-| Samba test VM 2 | samba-dc2 | 172.22.0.21 | For replication tests |
+| Role | Hostname | MAC (pinned) | IP (dnsmasq reservation) |
+|------|----------|------|------|
+| Gateway/DHCP/DNS | router1 | (not pinned) | `10.10.10.1/24` (static on LAN) |
+| WS2025 DC (first) | WS2025-DC1 | `00:15:5D:0A:0A:0A` | `10.10.10.10/24` |
+| Samba DC (primary test VM) | samba-dc1 | `00:15:5D:0A:0A:14` | `10.10.10.20/24` |
+| Samba DC (optional second) | samba-dc2 | `00:15:5D:0A:0A:15` | `10.10.10.21/24` |
+| Hyper-V host vNIC on Lab-NAT | — | — | dynamic DHCP (from router) |
 
-The internal switch has **no NAT** — VMs can only reach each other and the
-host. For package updates, see "Getting packages into VMs" below.
+The router also delegates the `lab.test` zone to the two DC IPs, so any LAN
+client pointing DNS at the router gets correct AD resolution.
 
 ---
 
-## Connection Details (fill in before handoff)
+## Connection details
 
-### Hyper-V Host
-
-```
-Hostname/IP:    server
-SSH:            ssh nmadmin@server   (key-based, no password)
-Shell:          PowerShell 7.6
-Admin rights:   nmadmin is full admin
-ISO share:      /Volumes/ISO (Mac) ↔ D:\ISO\ (host)
-```
-
-### Credentials (lab-only)
+### Hyper-V host
 
 ```
-WS2025 local Admin / Domain Admin / DSRM:  P@ssword123456!
-Domain:                                     lab.test / LAB (NetBIOS)
-Debian root password:                       (set during manual install)
+Host:   server
+SSH:    ssh nmadmin@server        (key-based, PowerShell 7.6 login shell)
+Mount:  /Volumes/ISO ↔ D:\ISO\
 ```
 
-### Available ISOs in D:\ISO\
+### Credentials (lab-only, never used outside the lab)
 
-- `debian-13.4.0-amd64-netinst.iso` — Debian install target
-- `26100.32230.260111-0550.lt_release_svc_refresh_SERVER_EVAL_x64FRE_en-us.iso` — WS2025 Eval
-- `WS2025-2602-Security-Baseline.zip` — GPO backups + ADMX + import scripts
+```
+WS2025 LAB\Administrator / DSRM:   P@ssword123456!
+Domain:                            lab.test (LAB NetBIOS)
+Debian root password:              (set during install)
+Debian debadmin user:              passwordless sudo, SSH key only
+router1 hm user:                   passwordless sudo, SSH key only
+```
+
+### Staged on D:\ISO\
+
+```
+debian-13.4.0-amd64-netinst.iso                       Debian install media
+debian-13-router-base.vhdx                            router base (from qcow2)
+router1-seed.iso                                      cloud-init seed for router
+26100.32230.260111-0550.lt_release_svc_refresh_SERVER_EVAL_x64FRE_en-us.iso
+                                                      Windows Server 2025 Eval
+WS2025-2602-Security-Baseline.zip                     MSFT baseline GPO bundle
+lab-scripts\                                          host-side PowerShell scripts
+```
 
 ---
 
-## How to interact with this environment
+## Working with the lab
 
-### Running commands on the Hyper-V host
+### Run a command on the Hyper-V host
 
 ```bash
-# Single command
+# One-liner
 ssh nmadmin@server 'Get-VM | Format-Table Name,State,Uptime'
 
-# Multi-line via heredoc (note: ssh invokes pwsh automatically since it's the login shell)
+# Multi-line via heredoc (the login shell is pwsh)
 ssh nmadmin@server << 'EOF'
 Get-VMSwitch
 Get-VM
 EOF
 
-# Run a PowerShell script file on the host
-ssh nmadmin@server 'pwsh -File D:\Lab\scripts\New-WS2025Lab.ps1'
+# Script file staged in D:\ISO\lab-scripts\
+ssh nmadmin@server 'pwsh -File D:\ISO\lab-scripts\Wait-DCReady.ps1'
 ```
 
-### Running commands on Windows VMs (PowerShell Direct)
+Heredocs with `$...` variables can get mangled by the local zsh before they
+reach ssh. When a script grows beyond one line or uses any `$vars`, put it in
+a `.ps1` file in `D:\ISO\lab-scripts\` and invoke it by path.
 
-PowerShell Direct works over VMBus — no network needed. Always available once
-the VM is booted past OOBE. Always wrap commands so they run on the **host**,
-which then invokes into the VM:
+### Run a command inside a Linux VM (router or Samba DC)
 
 ```bash
-ssh nmadmin@server << 'EOF'
-$cred = New-Object PSCredential('LAB\Administrator',
-    (ConvertTo-SecureString 'P@ssword123456!' -AsPlainText -Force))
-Invoke-Command -VMName 'WS2025-DC1' -Credential $cred -ScriptBlock {
-    Get-ADDomain
-}
-EOF
+# Via the host as jump (the host has a vNIC on Lab-NAT via DHCP)
+ssh -J nmadmin@server hm@10.10.10.1 'nft list ruleset'
+ssh -J nmadmin@server debadmin@10.10.10.20 'sudo systemctl is-active samba-ad-dc'
+
+# Mac → VM: direct scp
+scp -J nmadmin@server prepare-image.sh debadmin@10.10.10.20:/tmp/
 ```
 
-### Running commands on Linux VMs
-
-SSH with the host as jump host:
-
-```bash
-ssh -J nmadmin@server root@172.22.0.20
-```
-
-Or set up `~/.ssh/config` on the Mac for convenience:
+Optional `~/.ssh/config` on the Mac:
 
 ```
 Host hv-host
     HostName server
     User nmadmin
 
-Host samba-dc1
-    HostName 172.22.0.20
-    User root
+Host router1
+    HostName 10.10.10.1
+    User hm
     ProxyJump hv-host
 
-Host samba-dc2
-    HostName 172.22.0.21
-    User root
+Host samba-dc1
+    HostName 10.10.10.20
+    User debadmin
     ProxyJump hv-host
 ```
 
-### Transferring files
+### Run a command inside WS2025-DC1 (PowerShell Direct, no network)
 
 ```bash
-# Mac → Host (via mounted share)
-cp prepare-image.sh /Volumes/ISO/
-
-# Host → Linux VM (PowerShell Direct Copy-VMFile works on Debian with hv_utils)
 ssh nmadmin@server << 'EOF'
-Copy-VMFile -Name 'samba-dc1' -SourcePath 'D:\ISO\prepare-image.sh' `
-    -DestinationPath '/root/prepare-image.sh' -FileSource Host -CreateFullPath -Force
+$cred = New-Object PSCredential('LAB\Administrator',
+    (ConvertTo-SecureString 'P@ssword123456!' -AsPlainText -Force))
+Invoke-Command -VMName 'WS2025-DC1' -Credential $cred -ScriptBlock {
+    Get-ADDomain; Get-ADDomainController -Filter *
+}
 EOF
-
-# Host → Windows VM
-ssh nmadmin@server << 'EOF'
-Copy-VMFile -Name 'WS2025-DC1' -SourcePath 'D:\ISO\WS2025-2602-Security-Baseline.zip' `
-    -DestinationPath 'C:\Setup\WS2025-2602-Security-Baseline.zip' -FileSource Host -CreateFullPath -Force
-EOF
-
-# Mac → Linux VM (direct via jump)
-scp -J nmadmin@server prepare-image.sh root@172.22.0.20:/root/
 ```
 
-### Getting packages into VMs (no NAT on internal switch)
+Or stage a `.ps1` in `D:\ISO\lab-scripts\` (more reliable for anything
+multi-line).
 
-The internal switch has no route to the internet. Three options:
+### Packages inside the Samba VM
 
-**Option A — ICS (enables NAT, easiest)**
-Enable Internet Connection Sharing on the host's external NIC sharing to the
-`vEthernet (Lab-Internal)` adapter. One-time setup; makes 172.22.0.1 act as
-a NAT gateway.
-
-**Option B — Temporary external NIC on the VM**
-```powershell
-Add-VMNetworkAdapter -VMName 'samba-dc1' -SwitchName 'Default Switch'
-# Run updates in VM, then remove when done
-Remove-VMNetworkAdapter -VMName 'samba-dc1' -Name 'Network Adapter 2'
-```
-
-**Option C — Local HTTP cache** — overkill for a lab; skip.
-
-If running `prepare-image.sh`, it needs package installs, so do this BEFORE
-starting the script. Or: include external NIC, run prep, remove NIC, snapshot.
+The VM is on Lab-NAT with router1 providing NAT. `apt-get update` and `apt
+install X` work out of the box — no add/remove-NIC dance required. You can
+still manually attach a second NIC for unusual cases, but the baseline lab
+flow doesn't need it.
 
 ---
 
-## Persistent Lab Infrastructure — DO NOT TEAR DOWN
+## Persistent lab infrastructure — DO NOT TEAR DOWN CASUALLY
 
-These exist once and stay up. If missing, rebuild via scripts in `lab/`.
-**Never remove them at the end of a test run.**
+These are rebuilt via scripts in `lab/` but are designed to stay up across
+sessions:
 
-1. **Switch `Lab-Internal`** (172.22.0.0/24)
-2. **VM `WS2025-DC1`** at 172.22.0.10 — first DC of `lab.test`
-3. **Security baseline GPOs** imported and linked to OUs
+1. **Switch `Lab-NAT`** (Hyper-V internal)
+2. **VM `router1`** — gateway, DHCP server, DNS forwarder, NAT
+3. **VM `WS2025-DC1`** — first DC of `lab.test`, baseline GPOs linked
 4. **OU structure** in AD:
    ```
-   lab.test
+   DC=lab,DC=test
+     ├── Domain Controllers   (baseline DC GPO)
      └── OU=Lab
-           ├── OU=TestDCs       (Samba DCs join here)
-           └── OU=TestServers   (Windows test members)
+           ├── OU=TestDCs         (additional DCs under test)
+           └── OU=TestServers     (baseline Member Server GPO)
    ```
+5. **Baseline GPOs** imported, linked per table above, ADMX in SYSVOL central
+   store.
 
 ### Health check (run at start of every session)
 
 ```bash
-ssh nmadmin@server << 'EOF'
-$ErrorActionPreference = 'SilentlyContinue'
-
-# Switch
-$sw = Get-VMSwitch -Name Lab-Internal
-if ($sw) { "[OK] Switch Lab-Internal present" } else { "[MISSING] Switch Lab-Internal" }
-
-# DC VM
-$vm = Get-VM -Name WS2025-DC1
-if ($vm -and $vm.State -eq 'Running') {
-    "[OK] WS2025-DC1 running (uptime: $($vm.Uptime))"
-} elseif ($vm) {
-    "[WARN] WS2025-DC1 state: $($vm.State) — starting..."
-    Start-VM -Name WS2025-DC1
-} else {
-    "[MISSING] WS2025-DC1 — run lab/New-WS2025Lab.ps1"
-}
-
-# DC services via PSDirect
-$cred = New-Object PSCredential('LAB\Administrator',
-    (ConvertTo-SecureString 'P@ssword123456!' -AsPlainText -Force))
-try {
-    Invoke-Command -VMName WS2025-DC1 -Credential $cred -ScriptBlock {
-        "  AD domain: $((Get-ADDomain).DNSRoot)"
-        "  DNS zone:  $((Get-DnsServerZone -Name lab.test).ZoneName)"
-        "  GPOs:      $((Get-GPO -All).Count) total"
-    } -ErrorAction Stop
-} catch {
-    "[WARN] Could not reach DC via PSDirect — may still be booting"
-}
-EOF
+ssh nmadmin@server 'pwsh -File D:\ISO\lab-scripts\Health-Check.ps1'
 ```
+
+(Health-Check.ps1 needs to be updated for lab-v2 — TODO when we next touch
+lab scripts.)
 
 ---
 
-## Lab Setup Scripts
+## lab/ script layout (v2)
 
-The `lab/` directory contains PowerShell scripts that build the persistent
-infrastructure. **Run these once per environment** — they're idempotent and
-won't destroy existing resources.
+| Script | Purpose |
+|--------|---------|
+| `New-LabRouter.ps1` | Build router1 VM from staged VHDX + cloud-init seed ISO |
+| `New-WS2025Lab.ps1` | Build WS2025-DC1 (DISM-apply WIM, inject unattend + FirstLogon script, boot) |
+| `FirstLogon-PromoteToDC.ps1` | Runs inside WS2025-DC1: phase 1 (role install) triggers promotion + reboot; RunOnce re-fires it for phase 2 (OUs, reverse zone, forwarder) |
+| `unattend-ws2025-core.xml` | Panther unattend for WS2025 Server Core |
+| `Apply-SecurityBaseline.ps1` | Push GPO zip to DC, import, link DC baseline to Domain Controllers, Member Server baseline to Lab/TestServers (exact-name match, not wildcard) |
+| `New-SambaTestVM.ps1` | Create a fresh Debian VM on Lab-NAT with a pinned MAC matching a dnsmasq reservation; user then installs Debian manually |
+| `Wait-DCReady.ps1` | Poll `C:\Setup\setup-complete.marker` via PSDirect after WS2025 VM boots |
 
-### One-time: build the lab
+All scripts are idempotent where reasonable: re-running skips existing
+resources rather than destroying them. Destructive rebuild is always
+`Remove-VM <name> -Force` first.
 
-Copy scripts to the host first:
+### One-time lab build
+
 ```bash
-# From Mac repo directory:
-cp -r lab/ /Volumes/ISO/lab-scripts/
-# On host, scripts live at D:\ISO\lab-scripts\
-```
+# 0. Prerequisites: Debian cloud image + seed ISO + router base VHDX staged
+#    at D:\ISO\debian-13-router-base.vhdx  and  D:\ISO\router1-seed.iso
+#    (These are produced on the Mac side via qemu-img and hdiutil; see the
+#    "Staging router artifacts" section.)
 
-Then run on the host:
-```bash
-# 1. Create switch + WS2025 DC VM (~15 min; VM builds itself)
+ssh nmadmin@server 'pwsh -File D:\ISO\lab-scripts\New-LabRouter.ps1'
 ssh nmadmin@server 'pwsh -File D:\ISO\lab-scripts\New-WS2025Lab.ps1'
-
-# 2. Wait for DC to finish setup (check setup-complete.marker)
-ssh nmadmin@server << 'EOF'
-$cred = New-Object PSCredential('LAB\Administrator',
-    (ConvertTo-SecureString 'P@ssword123456!' -AsPlainText -Force))
-do {
-    Start-Sleep -Seconds 30
-    try {
-        $done = Invoke-Command -VMName WS2025-DC1 -Credential $cred -ScriptBlock {
-            Test-Path 'C:\Setup\setup-complete.marker'
-        } -ErrorAction Stop
-        Write-Host "  setup-complete: $done"
-    } catch {
-        Write-Host "  still booting..."
-    }
-} while (-not $done)
-EOF
-
-# 3. Apply security baseline
+ssh nmadmin@server 'pwsh -File D:\ISO\lab-scripts\Wait-DCReady.ps1'
 ssh nmadmin@server 'pwsh -File D:\ISO\lab-scripts\Apply-SecurityBaseline.ps1'
 ```
 
-### lab/ script summary
+### Staging router artifacts (one-time, on Mac)
 
-| Script | Purpose | Idempotent |
-|--------|---------|------------|
-| `New-WS2025Lab.ps1` | Creates switch + WS2025-DC1 VM via DISM+Panther injection | Yes (skips if VM exists) |
-| `unattend-ws2025-core.xml` | Panther unattend for WS2025 Server Core | — |
-| `FirstLogon-PromoteToDC.ps1` | Runs inside VM: configures IP, installs AD DS, promotes DC | Yes (phase markers) |
-| `Apply-SecurityBaseline.ps1` | Imports baseline ZIP, copies ADMX to SYSVOL, links GPOs | Mostly (GPLinks may duplicate) |
-| `New-SambaTestVM.ps1` | Creates fresh Debian VM with ISO attached | No (fails if VM exists) |
+```bash
+# Download Debian 13 genericcloud qcow2 (~300 MB) and convert to VHDX
+cd /Volumes/ISO
+curl -sSL -O https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2
+cp debian-13-genericcloud-amd64.qcow2 /tmp/debian-router.qcow2
+qemu-img convert -p -O vhdx -o subformat=dynamic \
+    /tmp/debian-router.qcow2 /tmp/debian-router-base.vhdx
+cp /tmp/debian-router-base.vhdx /Volumes/ISO/debian-13-router-base.vhdx
+
+# Build NoCloud seed ISO
+mkdir -p /tmp/seed-router
+# (user-data, meta-data, network-config — see lab/seed/ for canonical copies)
+cp lab/seed/* /tmp/seed-router/
+hdiutil makehybrid -iso -joliet -default-volume-name CIDATA \
+    -o /Volumes/ISO/router1-seed.iso /tmp/seed-router/
+```
+
+The qemu-img conversion takes ~60 s. Both artifacts are small enough to live
+on the ISO share permanently; re-running the lab build reuses them.
 
 ---
 
-## Test VM Lifecycle
+## Test VM lifecycle (samba-dc1)
 
-Treat Debian VMs as disposable. The workflow:
+### Initial setup (once per VM identity)
 
-### Initial setup (once per VM)
-
-1. Create VM:
+1. Create the Debian VM on Lab-NAT with a pinned MAC that matches the
+   dnsmasq reservation for the intended IP:
    ```bash
    ssh nmadmin@server 'pwsh -File D:\ISO\lab-scripts\New-SambaTestVM.ps1 -VMName samba-dc1 -Start'
    ```
 
-2. Install Debian manually via `vmconnect localhost samba-dc1`:
-   - Minimal install, SSH server only, no desktop
-   - Hostname: `samba-dc1` (short)
-   - Static IP: 172.22.0.20/24, gateway 172.22.0.1, DNS 172.22.0.10 (but
-     until prepare-image runs, the VM needs internet — use Option B above
-     during install, set DNS to 1.1.1.1 temporarily)
-   - Root password set, no regular user
-   - Takes ~5 minutes
+2. Install Debian via `vmconnect localhost samba-dc1`:
+   - Minimal install, "SSH server" + "standard system utilities" only
+   - Hostname: `samba-dc1`
+   - Network: **DHCP** (router1's dnsmasq will hand out 10.10.10.20 via
+     reservation)
+   - Root password set, `debadmin` user created
+   - Install takes ~5 minutes
 
-3. Remove the install DVD:
+3. At the console after first boot, log in as root and set up `debadmin`
+   for passwordless sudo + SSH key:
+   ```
+   apt update && apt install -y sudo
+   echo 'debadmin ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/debadmin
+   chmod 440 /etc/sudoers.d/debadmin
+   mkdir -p /home/debadmin/.ssh && chmod 700 /home/debadmin/.ssh
+   # copy Mac ~/.ssh/id_ed25519.pub content here:
+   printf 'ssh-ed25519 AAAA... hooman@mac.com\n' >> /home/debadmin/.ssh/authorized_keys
+   chown -R debadmin:debadmin /home/debadmin/.ssh
+   chmod 600 /home/debadmin/.ssh/authorized_keys
+   ```
+
+4. Verify from the Mac:
+   ```bash
+   ssh -J nmadmin@server debadmin@10.10.10.20 'sudo -n true && echo OK'
+   ```
+
+5. Remove the install DVD:
    ```bash
    ssh nmadmin@server 'Set-VMDvdDrive -VMName samba-dc1 -Path $null'
    ```
 
-4. Temporarily attach external NIC for package downloads:
+6. Copy the appliance scripts and run image prep — **no temporary NIC
+   needed**, internet is already reachable via router1:
    ```bash
-   ssh nmadmin@server "Add-VMNetworkAdapter -VMName samba-dc1 -SwitchName 'Default Switch'"
-   ssh -J nmadmin@server root@172.22.0.20 'dhclient eth1 || ip link set eth1 up && dhclient eth1'
+   scp -J nmadmin@server prepare-image.sh samba-sconfig.sh debadmin@10.10.10.20:/tmp/
+   ssh -J nmadmin@server debadmin@10.10.10.20 'sudo install -m 0755 /tmp/prepare-image.sh /root/'
+   ssh -J nmadmin@server debadmin@10.10.10.20 'sudo install -m 0755 /tmp/samba-sconfig.sh /usr/local/sbin/samba-sconfig'
+   ssh -J nmadmin@server debadmin@10.10.10.20 'sudo bash /root/prepare-image.sh'
    ```
 
-5. Copy scripts and run prep:
+7. Shutdown, checkpoint as `golden-image`:
    ```bash
-   scp -J nmadmin@server prepare-image.sh samba-sconfig.sh \
-       root@172.22.0.20:/root/
-   ssh -J nmadmin@server root@172.22.0.20 'bash /root/prepare-image.sh'
+   ssh -J nmadmin@server debadmin@10.10.10.20 'sudo shutdown -h now' || true
+   # wait until off
+   ssh nmadmin@server 'Checkpoint-VM -Name samba-dc1 -SnapshotName golden-image'
    ```
 
-6. Remove external NIC, shutdown, checkpoint:
-   ```bash
-   ssh -J nmadmin@server root@172.22.0.20 'shutdown -h now' || true
-   sleep 10
-   ssh nmadmin@server << 'EOF'
-   Remove-VMNetworkAdapter -VMName samba-dc1 -Name 'Network Adapter 2' -ErrorAction SilentlyContinue
-   Checkpoint-VM -Name samba-dc1 -SnapshotName 'golden-image'
-EOF
-   ```
-
-### Per test cycle (fast)
+### Per test cycle
 
 ```bash
 ssh nmadmin@server << 'EOF'
@@ -364,265 +342,91 @@ Stop-VM -Name samba-dc1 -Force -ErrorAction SilentlyContinue
 Restore-VMCheckpoint -Name golden-image -VMName samba-dc1 -Confirm:$false
 Start-VM -Name samba-dc1
 EOF
-sleep 30  # wait for boot
 
-# Run the test scenario
-ssh -J nmadmin@server root@172.22.0.20 'samba-sconfig ...'
+# Run the scenario via the headless CLI (see samba-sconfig.sh):
+ssh -J nmadmin@server debadmin@10.10.10.20 \
+    'sudo env SC_REALM=lab.test SC_NETBIOS=LAB SC_DC=10.10.10.10 SC_PASS=P@ssword123456! \
+     samba-sconfig join-dc'
 ```
 
-### Cleanup at end of all testing
+### Cleanup at end of session
 
-Delete test VMs **only** (never WS2025-DC1):
+Only the test VMs. Never touch router1 or WS2025-DC1 (they're persistent).
+
 ```bash
 ssh nmadmin@server << 'EOF'
 Stop-VM -Name samba-dc1 -Force -ErrorAction SilentlyContinue
-Remove-VM -Name samba-dc1 -Force
-Remove-Item D:\Lab\samba-dc1 -Recurse -Force
+Restore-VMCheckpoint -Name golden-image -VMName samba-dc1 -Confirm:$false
+Stop-VM -Name samba-dc1 -Force
 EOF
 ```
 
 ---
 
-## Test Scenarios
+## Test scenarios
 
-### Scenario 1: Standalone new forest
-
-**Goal:** verify `samba-tool domain provision` works end-to-end on a
-prep'd image.
+### Scenario 1: Standalone new forest (no existing DC in lab)
 
 ```bash
-ssh -J nmadmin@server root@172.22.0.20 << 'EOF'
-rm -f /etc/samba/smb.conf
-systemctl stop samba-ad-dc 2>/dev/null
-
-cat > /etc/krb5.conf << 'KRB'
+ssh -J nmadmin@server debadmin@10.10.10.20 << 'EOF'
+sudo rm -f /etc/samba/smb.conf
+sudo systemctl stop samba-ad-dc 2>/dev/null
+sudo tee /etc/krb5.conf > /dev/null << 'KRB'
 [libdefaults]
   default_realm = TEST.LAN
   dns_lookup_kdc = true
   dns_lookup_realm = false
 KRB
-
-samba-tool domain provision \
+sudo samba-tool domain provision \
     --realm=TEST.LAN --domain=TEST \
     --server-role=dc --dns-backend=SAMBA_INTERNAL \
     --adminpass='P@ssword123456!' \
-    --option='dns forwarder = 172.22.0.10'
-
-rm -f /var/lib/samba/private/krb5.conf
-ln -s /etc/krb5.conf /var/lib/samba/private/krb5.conf
-
-cat > /etc/resolv.conf << 'DNS'
-search test.lan
-nameserver 127.0.0.1
-DNS
-
-systemctl unmask samba-ad-dc
-systemctl enable samba-ad-dc
-systemctl start samba-ad-dc
+    --option='dns forwarder = 10.10.10.1'
+sudo systemctl unmask samba-ad-dc
+sudo systemctl enable --now samba-ad-dc
 sleep 5
-
-echo "=== Verify ==="
-dig @localhost samba-dc1.test.lan +short
-dig -t SRV @localhost _ldap._tcp.test.lan +short
-echo 'P@ssword123456!' | kinit administrator && klist
-smbclient -L localhost -U% -N | grep -E '(sysvol|netlogon)'
-samba-tool domain level show
+sudo net ads info -P
 EOF
 ```
 
-### Scenario 2: Join existing WS2025 forest as additional DC
+### Scenario 2: Join existing WS2025 forest as additional DC (primary test)
 
-**This is the highest-value test.** Validates compatibility with a WS2025
-domain that has the security baseline applied.
+Use the headless CLI that drives samba-sconfig's fixes (FL detect, PTR, SYSVOL
+seed, TLS cert, chrony re-point):
 
 ```bash
-ssh -J nmadmin@server root@172.22.0.20 << 'EOF'
-# Pre-flight checks
-ping -c 3 172.22.0.10 || exit 1
-dig @172.22.0.10 lab.test +short
-dig -t SRV @172.22.0.10 _ldap._tcp.lab.test +short
+ssh -J nmadmin@server debadmin@10.10.10.20 \
+    'sudo env SC_REALM=lab.test SC_NETBIOS=LAB SC_DC=10.10.10.10 SC_PASS=P@ssword123456! \
+     samba-sconfig join-dc 2>&1 | grep -E "^\\[sconfig\\]"'
+```
 
-# DNS at WS2025 DC
-cat > /etc/resolv.conf << 'DNS'
-search lab.test
-nameserver 172.22.0.10
-DNS
+Expected clean output on first try:
 
-# Time sync
-chronyc makestep
-
-# krb5.conf
-cat > /etc/krb5.conf << 'KRB'
-[libdefaults]
-  default_realm = LAB.TEST
-  dns_lookup_kdc = true
-  dns_lookup_realm = false
-KRB
-
-systemctl stop samba-ad-dc 2>/dev/null
-rm -f /etc/samba/smb.conf
-
-# Join!
-samba-tool domain join lab.test DC \
-    --dns-backend=SAMBA_INTERNAL \
-    --option='dns forwarder = 172.22.0.10' \
-    -U'LAB\Administrator' \
-    --password='P@ssword123456!'
-
-# Post-join
-rm -f /var/lib/samba/private/krb5.conf
-ln -s /etc/krb5.conf /var/lib/samba/private/krb5.conf
-cat > /etc/resolv.conf << 'DNS'
-search lab.test
-nameserver 127.0.0.1
-DNS
-
-systemctl unmask samba-ad-dc
-systemctl enable samba-ad-dc
-systemctl start samba-ad-dc
-sleep 10
-
-echo "=== Verify replication ==="
-samba-tool drs showrepl
-EOF
-
-# Cross-check from WS2025 side
-ssh nmadmin@server << 'EOF'
-$cred = New-Object PSCredential('LAB\Administrator',
-    (ConvertTo-SecureString 'P@ssword123456!' -AsPlainText -Force))
-Invoke-Command -VMName WS2025-DC1 -Credential $cred -ScriptBlock {
-    Get-ADDomainController -Filter *
-    nltest /dsgetdc:lab.test
-    repadmin /showrepl
-}
-EOF
+```
+[sconfig] forest FL probe: 2016
+[sconfig] joining LAB.TEST as DC via 10.10.10.10 (FL=2016)...
+[sconfig] PTR registered on 10.10.10.10
+[sconfig] SYSVOL seeded. Resetting NTACLs...
+[sconfig] chrony repointed at 10.10.10.10
+[sconfig] TLS cert installed
+[sconfig] JOIN SUCCESS (FL=2016) — TLS cert has SAN, PTR registered, SYSVOL seeded
 ```
 
 ### Scenario 3: RODC in WS2025 forest
 
-Same as Scenario 2, but use `RODC` instead of `DC` in the join command:
+Same as Scenario 2 with `SC_ROLE=RODC`:
 
 ```bash
-samba-tool domain join lab.test RODC \
-    --dns-backend=SAMBA_INTERNAL \
-    --option='dns forwarder = 172.22.0.10' \
-    -U'LAB\Administrator' \
-    --password='P@ssword123456!'
+ssh -J nmadmin@server debadmin@10.10.10.20 \
+    'sudo env SC_REALM=lab.test SC_NETBIOS=LAB SC_DC=10.10.10.10 SC_PASS=P@ssword123456! \
+     SC_ROLE=RODC samba-sconfig join-dc'
 ```
 
----
-
-## Automated Test Runner
-
-Save as `run-tests.sh` in the repo root. Runs all scenarios, saves logs.
+### Verifying from the WS2025 side
 
 ```bash
-#!/usr/bin/env bash
-set -u
-HYPERV_HOST='server'
-VM_NAME='samba-dc1'
-VM_IP='172.22.0.20'
-RESULTS_DIR='test-results'
-mkdir -p "$RESULTS_DIR"
-
-hv()     { ssh "nmadmin@${HYPERV_HOST}" "$@"; }
-vm()     { ssh -J "nmadmin@${HYPERV_HOST}" "root@${VM_IP}" "$@"; }
-revert() {
-    hv "Stop-VM -Name $VM_NAME -Force -ErrorAction SilentlyContinue;
-        Restore-VMCheckpoint -Name golden-image -VMName $VM_NAME -Confirm:\$false;
-        Start-VM -Name $VM_NAME"
-    # Wait for SSH to come back
-    local tries=0
-    while ! vm 'true' 2>/dev/null; do
-        sleep 5
-        tries=$((tries+1))
-        [[ $tries -gt 30 ]] && { echo "VM didn't come up"; return 1; }
-    done
-}
-
-run_scenario() {
-    local name="$1"; shift
-    local logfile="$RESULTS_DIR/${name}.log"
-    echo "[$(date +%H:%M:%S)] === $name ==="
-    revert || { echo "  revert failed"; return 1; }
-    vm 'bash -s' > "$logfile" 2>&1 <<< "$*"
-    local rc=$?
-    echo "[$(date +%H:%M:%S)]     exit=$rc  log=$logfile"
-    return $rc
-}
-
-# Scenario 1
-run_scenario 'new-forest' '
-    set -e
-    rm -f /etc/samba/smb.conf
-    cat > /etc/krb5.conf << EOF
-[libdefaults]
-  default_realm = TEST.LAN
-  dns_lookup_kdc = true
-EOF
-    samba-tool domain provision --realm=TEST.LAN --domain=TEST \
-        --server-role=dc --dns-backend=SAMBA_INTERNAL \
-        --adminpass="P@ssword123456!"
-    rm -f /var/lib/samba/private/krb5.conf
-    ln -s /etc/krb5.conf /var/lib/samba/private/krb5.conf
-    systemctl unmask samba-ad-dc && systemctl start samba-ad-dc
-    sleep 5
-    systemctl is-active samba-ad-dc
-    dig -t SRV @localhost _ldap._tcp.test.lan +short
-'
-
-# Scenario 2
-run_scenario 'join-ws2025-dc' '
-    set -e
-    echo -e "search lab.test\nnameserver 172.22.0.10" > /etc/resolv.conf
-    chronyc makestep || true
-    cat > /etc/krb5.conf << EOF
-[libdefaults]
-  default_realm = LAB.TEST
-  dns_lookup_kdc = true
-EOF
-    rm -f /etc/samba/smb.conf
-    samba-tool domain join lab.test DC \
-        --dns-backend=SAMBA_INTERNAL \
-        -U"LAB\\Administrator" --password="P@ssword123456!"
-    echo -e "search lab.test\nnameserver 127.0.0.1" > /etc/resolv.conf
-    systemctl unmask samba-ad-dc && systemctl start samba-ad-dc
-    sleep 10
-    samba-tool drs showrepl
-'
-
-# Scenario 3
-run_scenario 'join-ws2025-rodc' '
-    set -e
-    echo -e "search lab.test\nnameserver 172.22.0.10" > /etc/resolv.conf
-    chronyc makestep || true
-    cat > /etc/krb5.conf << EOF
-[libdefaults]
-  default_realm = LAB.TEST
-  dns_lookup_kdc = true
-EOF
-    rm -f /etc/samba/smb.conf
-    samba-tool domain join lab.test RODC \
-        --dns-backend=SAMBA_INTERNAL \
-        -U"LAB\\Administrator" --password="P@ssword123456!"
-    echo -e "search lab.test\nnameserver 127.0.0.1" > /etc/resolv.conf
-    systemctl unmask samba-ad-dc && systemctl start samba-ad-dc
-    sleep 10
-    samba-tool drs showrepl
-'
-
-echo ""
-echo "=== Summary ==="
-for log in "$RESULTS_DIR"/*.log; do
-    if grep -q 'is_active' "$log" && tail -1 "$log" | grep -q 'active'; then
-        echo "  PASS  $(basename "$log" .log)"
-    else
-        echo "  FAIL  $(basename "$log" .log)"
-    fi
-done
-
-# Always leave VM in known state
-hv "Restore-VMCheckpoint -Name golden-image -VMName $VM_NAME -Confirm:\$false; Stop-VM $VM_NAME -Force"
+# Invoke via PSDirect (use a staged .ps1 if the heredoc has any $vars)
+ssh nmadmin@server 'pwsh -File D:\ISO\lab-scripts\T3-FullVerify.ps1'
 ```
 
 ---
@@ -633,88 +437,77 @@ hv "Restore-VMCheckpoint -Name golden-image -VMName $VM_NAME -Confirm:\$false; S
 
 | Location | Contents |
 |---|---|
-| Linux VM: `journalctl -u samba-ad-dc -f` | Live Samba logs |
-| Linux VM: `/var/log/samba/` | Per-service Samba logs |
-| WS2025: `Get-WinEvent -LogName 'Directory Service'` | AD events |
-| Host: `Get-WinEvent -LogName Microsoft-Windows-Hyper-V-Worker-Admin` | VM events |
+| router1: `journalctl -u dnsmasq -f` | DHCP leases, DNS queries (verbose by default) |
+| router1: `journalctl -u nftables` | NAT / firewall changes |
+| Samba VM: `journalctl -u samba-ad-dc -f` | Live Samba logs |
+| Samba VM: `/var/log/samba/` | Per-service Samba logs |
+| WS2025: `Get-WinEvent -LogName 'Directory Service'` | AD events (especially 1925, 1725) |
+| Hyper-V host: `Get-WinEvent -LogName Microsoft-Windows-Hyper-V-Worker-Admin` | VM lifecycle events |
 
 ### Common failures joining WS2025
 
-| Symptom | Cause | Fix |
+| Symptom | Root cause | Resolution |
 |---|---|---|
-| `domain join` hangs at "Looking for DC" | DNS not pointing at WS2025 | Fix resolv.conf |
-| `clock skew too great` | Time drift | `chronyc makestep` before join |
-| `LDAP_STRONG_AUTH_REQUIRED` | LDAP signing required by baseline | Generate TLS cert (sconfig menu 5) |
-| `KDC has no support for encryption type` | Baseline disabled RC4 | Ensure `kerberos encryption types = aes256-cts-hmac-sha1-96 aes128-cts-hmac-sha1-96` |
-| `KERBEROS_PREAUTH_FAILED` | Time or realm case | Realm must be UPPERCASE |
-| `NT_STATUS_LOGON_FAILURE` on join | Credentials wrong or baseline blocking | Verify NTLM fallback not needed |
-| Join succeeds but replication fails | SYSVOL ACLs | Run `samba-tool ntacl sysvolreset` |
+| `samba-tool domain join` hangs at "Looking for DC" | DNS not pointing at WS2025 | sconfig `join-dc` sets resolv.conf automatically; check router dnsmasq is up |
+| `clock skew too great` | Guest clock drift | Hyper-V Integration Services keeps VMs in sync; if disabled, `chronyc makestep` |
+| `WERR_DS_INCOMPATIBLE_VERSION` on `DsAddEntry` | Samba advertising 2008_R2 FL against 2016+ forest | sconfig auto-detects via rootDSE and passes `ad dc functional level = 2016` |
+| `repadmin /showrepl` reports 8524 DNS lookup failure | Samba DC's PTR missing on WS2025 reverse zone | sconfig `register_own_ptr` handles this post-join |
+| `LDAP_STRONG_AUTH_REQUIRED` | Baseline requires signing | Samba default is to sign; verify `ldap server require strong auth = yes` in smb.conf (sconfig hardening sets this) |
+| SYSVOL `Policies/` empty on Samba | Samba has no DFSR | sconfig seeds via smbclient post-join; set up `sysvol-sync` timer for ongoing |
 
-### Investigation commands
+### Useful investigation commands
 
 ```bash
-# Linux VM
-testparm -s
-samba-tool dbcheck --cross-ncs
-samba-tool drs showrepl
-samba-tool dns query localhost lab.test @ ALL
-net ads info
-wbinfo -t
-smbclient //ws2025-dc1.lab.test/sysvol -U 'LAB\Administrator'
+# From Samba DC
+sudo testparm -s 2>&1 | head -30
+sudo samba-tool dbcheck --cross-ncs
+sudo samba-tool drs showrepl
+sudo samba-tool dns query 10.10.10.10 lab.test @ ALL -U 'LAB\\Administrator' --password=P@ssword123456!
+sudo net ads info -P
+sudo net ads testjoin
+sudo wbinfo -t
 
-# WS2025 via PSDirect
-ssh nmadmin@server << 'EOF'
-$cred = New-Object PSCredential('LAB\Administrator',
-    (ConvertTo-SecureString 'P@ssword123456!' -AsPlainText -Force))
-Invoke-Command -VMName WS2025-DC1 -Credential $cred -ScriptBlock {
-    Get-ADDomainController -Filter *
-    Get-DnsServerResourceRecord -ZoneName lab.test -RRType A
-    repadmin /showrepl
-    Get-GPO -All | Select DisplayName
-}
-EOF
+# From the WS2025 side (via staged .ps1)
+ssh nmadmin@server 'pwsh -File D:\ISO\lab-scripts\T3-FullVerify.ps1'
 ```
 
 ---
 
-## Script Modification Loop
-
-1. Edit `prepare-image.sh` or `samba-sconfig.sh` in repo
-2. `scp -J nmadmin@server samba-sconfig.sh root@172.22.0.20:/usr/local/sbin/samba-sconfig`
-3. If `prepare-image.sh` changed → need fresh install (re-run initial setup)
-4. If `samba-sconfig.sh` only → revert checkpoint, replace file, re-test
-
----
-
-## Session Checklist
+## Session checklist
 
 **Start of session:**
-- [ ] Run health check — switch + WS2025-DC1 up, domain healthy
-- [ ] `samba-dc1` VM exists with `golden-image` checkpoint
-- [ ] Scripts in repo current
+- [ ] Health check (Health-Check.ps1) — router1 + WS2025-DC1 running, domain healthy
+- [ ] `samba-dc1` VM exists with `golden-image` checkpoint (if testing join flow)
+- [ ] Scripts in repo current; lab-scripts on host current
 
 **End of session:**
 - [ ] Commit script changes to repo
 - [ ] `samba-dc1` reverted to golden-image, powered off
 - [ ] Test logs saved in `test-results/`
-- [ ] **Lab infrastructure (switch + WS2025-DC1) STILL RUNNING** ← critical
-- [ ] Summary written to handoff notes
+- [ ] **router1 + WS2025-DC1 still running** ← critical (persistent infra)
+- [ ] Handoff notes updated if anything surprised you
 
 ---
 
-## File Layout
+## File layout
 
 ```
 Repo root
 ├── CLAUDE.md                       (this file)
+├── HANDOFF.md                      (user-facing setup checklist)
 ├── prepare-image.sh                (Debian image prep)
-├── samba-sconfig.sh                (TUI config tool)
-├── run-tests.sh                    (test orchestrator, optional)
+├── samba-sconfig.sh                (TUI + headless CLI)
 ├── lab/
-│   ├── New-WS2025Lab.ps1           (build lab infra)
-│   ├── Apply-SecurityBaseline.ps1  (import GPOs)
-│   ├── New-SambaTestVM.ps1         (create Debian VM)
-│   ├── FirstLogon-PromoteToDC.ps1  (runs inside WS2025 VM on first boot)
-│   └── unattend-ws2025-core.xml    (Panther unattend file)
-└── test-results/                   (test run logs)
+│   ├── New-LabRouter.ps1           (build router1)
+│   ├── New-WS2025Lab.ps1           (build WS2025-DC1)
+│   ├── FirstLogon-PromoteToDC.ps1  (runs inside WS2025-DC1 via autologon + RunOnce)
+│   ├── unattend-ws2025-core.xml    (Panther unattend)
+│   ├── Apply-SecurityBaseline.ps1  (import + link baseline GPOs)
+│   ├── New-SambaTestVM.ps1         (create empty Debian VM on Lab-NAT)
+│   ├── Wait-DCReady.ps1            (poll for setup-complete marker)
+│   └── seed/
+│       ├── user-data               (cloud-init for router1)
+│       ├── meta-data
+│       └── network-config
+└── test-results/                   (per-scenario logs, REPORT.md, topology.drawio)
 ```

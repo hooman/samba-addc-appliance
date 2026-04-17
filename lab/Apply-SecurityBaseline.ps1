@@ -24,8 +24,11 @@ param(
     [string]$DomainName      = 'lab.test',
     [string]$NetBiosName     = 'LAB',
     [string]$AdminPassword   = 'P@ssword123456!',
-    [string]$DcPolicyPattern = '*Domain Controller*',
-    [string]$MemberPolicyPattern = '*Member Server*'
+    # Use exact DisplayName matches — the broader `*Member Server*` pattern
+    # also matches `MSFT Windows Server 2025 v2602 - Member Server Credential
+    # Guard` and with `Select -First 1` picks the wrong one.
+    [string]$DcPolicyName     = 'MSFT Windows Server 2025 v2602 - Domain Controller',
+    [string]$MemberPolicyName = 'MSFT Windows Server 2025 v2602 - Member Server'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -120,32 +123,34 @@ Write-OK "Baseline GPOs imported into domain"
 Write-Step "Linking baseline GPOs to OUs"
 
 Invoke-Command -VMName $DcVMName -Credential $Cred -ScriptBlock {
-    param($DcPattern, $MemberPattern)
+    param($DcName, $MemberName)
     Import-Module GroupPolicy
 
-    # DC baseline → Domain Controllers OU
-    $dcGpo = Get-GPO -All | Where-Object { $_.DisplayName -like $DcPattern } |
-             Select-Object -First 1
+    # DC baseline -> Domain Controllers OU
+    $dcGpo = Get-GPO -Name $DcName -ErrorAction SilentlyContinue
     if ($dcGpo) {
         New-GPLink -Name $dcGpo.DisplayName `
             -Target 'OU=Domain Controllers,DC=lab,DC=test' `
             -LinkEnabled Yes -ErrorAction SilentlyContinue | Out-Null
-        Write-Host "    ✓ Linked '$($dcGpo.DisplayName)' → Domain Controllers"
+        Write-Host "    + Linked '$($dcGpo.DisplayName)' -> Domain Controllers"
+    } else {
+        Write-Host "    ! GPO '$DcName' not found"
     }
 
-    # Member Server baseline → Lab/TestServers OU
-    $memberGpo = Get-GPO -All | Where-Object { $_.DisplayName -like $MemberPattern } |
-                 Select-Object -First 1
+    # Member Server baseline -> Lab/TestServers OU
+    $memberGpo = Get-GPO -Name $MemberName -ErrorAction SilentlyContinue
     if ($memberGpo) {
         New-GPLink -Name $memberGpo.DisplayName `
             -Target 'OU=TestServers,OU=Lab,DC=lab,DC=test' `
             -LinkEnabled Yes -ErrorAction SilentlyContinue | Out-Null
-        Write-Host "    ✓ Linked '$($memberGpo.DisplayName)' → Lab/TestServers"
+        Write-Host "    + Linked '$($memberGpo.DisplayName)' -> Lab/TestServers"
+    } else {
+        Write-Host "    ! GPO '$MemberName' not found"
     }
 
     # Force GP update on DC
     gpupdate /force | Out-Null
-} -ArgumentList $DcPolicyPattern, $MemberPolicyPattern
+} -ArgumentList $DcPolicyName, $MemberPolicyName
 
 Write-OK "Baseline applied and linked"
 
