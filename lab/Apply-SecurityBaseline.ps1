@@ -24,11 +24,24 @@ param(
     [string]$DomainName      = 'lab.test',
     [string]$NetBiosName     = 'LAB',
     [string]$AdminPassword   = 'P@ssword123456!',
-    # Use exact DisplayName matches — the broader `*Member Server*` pattern
-    # also matches `MSFT Windows Server 2025 v2602 - Member Server Credential
-    # Guard` and with `Select -First 1` picks the wrong one.
-    [string]$DcPolicyName     = 'MSFT Windows Server 2025 v2602 - Domain Controller',
-    [string]$MemberPolicyName = 'MSFT Windows Server 2025 v2602 - Member Server'
+    # Intended link targets for each baseline GPO. Empty Target means "skip".
+    # Keyed by exact DisplayName to avoid the *Member Server* wildcard trap
+    # (matches both Member Server and Member Server Credential Guard).
+    [hashtable]$BaselineLinks = @{
+        # Domain-wide: account/audit policies, defender, legacy IE compat
+        'MSFT Windows Server 2025 v2602 - Domain Security'  = 'DC=lab,DC=test'
+        'MSFT Windows Server 2025 v2602 - Defender Antivirus' = 'DC=lab,DC=test'
+        'MSFT Internet Explorer 11 - Computer'               = 'DC=lab,DC=test'
+        'MSFT Internet Explorer 11 - User'                   = 'DC=lab,DC=test'
+
+        # Domain Controllers OU: DC-specific hardening (LDAP, DRS, SYSVOL) + VBS
+        'MSFT Windows Server 2025 v2602 - Domain Controller' = 'OU=Domain Controllers,DC=lab,DC=test'
+        'MSFT Windows Server 2025 v2602 - Domain Controller Virtualization Based Security' = 'OU=Domain Controllers,DC=lab,DC=test'
+
+        # Member Servers OU: general server hardening + Credential Guard
+        'MSFT Windows Server 2025 v2602 - Member Server'     = 'OU=TestServers,OU=Lab,DC=lab,DC=test'
+        'MSFT Windows Server 2025 v2602 - Member Server Credential Guard' = 'OU=TestServers,OU=Lab,DC=lab,DC=test'
+    }
 )
 
 $ErrorActionPreference = 'Stop'
@@ -123,34 +136,39 @@ Write-OK "Baseline GPOs imported into domain"
 Write-Step "Linking baseline GPOs to OUs"
 
 Invoke-Command -VMName $DcVMName -Credential $Cred -ScriptBlock {
-    param($DcName, $MemberName)
+    param($LinkMap)
     Import-Module GroupPolicy
 
-    # DC baseline -> Domain Controllers OU
-    $dcGpo = Get-GPO -Name $DcName -ErrorAction SilentlyContinue
-    if ($dcGpo) {
-        New-GPLink -Name $dcGpo.DisplayName `
-            -Target 'OU=Domain Controllers,DC=lab,DC=test' `
-            -LinkEnabled Yes -ErrorAction SilentlyContinue | Out-Null
-        Write-Host "    + Linked '$($dcGpo.DisplayName)' -> Domain Controllers"
-    } else {
-        Write-Host "    ! GPO '$DcName' not found"
-    }
+    foreach ($entry in $LinkMap.GetEnumerator() | Sort-Object Name) {
+        $name = $entry.Key
+        $target = $entry.Value
+        if (-not $target) { continue }
 
-    # Member Server baseline -> Lab/TestServers OU
-    $memberGpo = Get-GPO -Name $MemberName -ErrorAction SilentlyContinue
-    if ($memberGpo) {
-        New-GPLink -Name $memberGpo.DisplayName `
-            -Target 'OU=TestServers,OU=Lab,DC=lab,DC=test' `
-            -LinkEnabled Yes -ErrorAction SilentlyContinue | Out-Null
-        Write-Host "    + Linked '$($memberGpo.DisplayName)' -> Lab/TestServers"
-    } else {
-        Write-Host "    ! GPO '$MemberName' not found"
+        $gpo = Get-GPO -Name $name -ErrorAction SilentlyContinue
+        if (-not $gpo) {
+            Write-Host "    ! GPO '$name' not found in domain"
+            continue
+        }
+
+        # Idempotent: if a link on this target already exists, skip creation
+        $inh = Get-GPInheritance -Target $target -ErrorAction SilentlyContinue
+        $already = $inh.GpoLinks | Where-Object DisplayName -eq $name
+        if ($already) {
+            Write-Host "    = '$name' already linked -> $target"
+            continue
+        }
+
+        try {
+            New-GPLink -Name $name -Target $target -LinkEnabled Yes -ErrorAction Stop | Out-Null
+            Write-Host "    + Linked '$name' -> $target"
+        } catch {
+            Write-Host "    ! New-GPLink failed for '$name' -> $target : $_"
+        }
     }
 
     # Force GP update on DC
     gpupdate /force | Out-Null
-} -ArgumentList $DcPolicyName, $MemberPolicyName
+} -ArgumentList $BaselineLinks
 
 Write-OK "Baseline applied and linked"
 
