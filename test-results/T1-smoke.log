@@ -1,0 +1,58 @@
+[33;1mWARNING: The virtual machine is already in the specified state.[0m
+
+[32;1mName  : [0msamba-dc1
+[32;1mState : [0mRunning
+
+SSH up after 10s
+=== hostname + net ===
+samba-dc1
+eth0             UP             172.22.0.20/24 fe80::215:5dff:fe00:410/64 
+default via 172.22.0.1 dev eth0 onlink 
+=== samba-ad-dc state (expect: masked, inactive) ===
+inactive
+disabled
+=== samba-sconfig tool ===
+-rwx--x--x 1 root root 41943 Apr 16 21:10 /usr/local/sbin/samba-sconfig
+--- samba-sconfig --help ---
+=== PowerShell ===
+
+[32;1mMajor [0m[32;1m Minor [0m[32;1m Patch [0m[32;1m PreReleaseLabel[0m[32;1m BuildLabel[0m
+[32;1m----- [0m [32;1m----- [0m [32;1m----- [0m [32;1m---------------[0m [32;1m----------[0m
+7      6      0                      
+
+=== Samba version ===
+bash: line 20: samba: command not found
+=== samba version (with /usr/sbin) ===
+Version 4.22.8-Debian-4.22.8+dfsg-0+deb13u1
+=== chrony ===
+active
+Reference ID    : 00000000 ()
+Stratum         : 0
+Ref time (UTC)  : Thu Jan 01 00:00:00 1970
+System time     : 0.000000000 seconds fast of NTP time
+Last offset     : +0.000000000 seconds
+=== smb.conf (should be absent before provision/join) ===
+ls: cannot access '/etc/samba/smb.conf': No such file or directory
+(no smb.conf - good)
+=== krb5.conf skeleton ===
+[libdefaults]
+  default_realm = YOURREALM.LAN
+  dns_lookup_kdc = true
+  dns_lookup_realm = false
+=== samba-sconfig TUI entry (banner only, no TTY) ===
+=== firewall status (sconfig writes rules, inactive until deploy) ===
+sudo: iptables: command not found
+=== listening ports (pre-deploy; should be empty for DC services) ===
+(no DC ports listening - good)
+=== chrony.conf ===
+server time.cloudflare.com iburst
+server time.google.com iburst
+pool 2.debian.pool.ntp.org iburst
+driftfile /var/lib/chrony/drift
+ntpsigndsocket /var/lib/samba/ntp_signd
+makestep 1.0 3
+
+=== nft/iptables availability ===
+○ nftables.service - nftables
+     Loaded: loaded (/usr/lib/systemd/system/nftables.service; disabled; preset: enabled)
+     Active: inactive (dead)

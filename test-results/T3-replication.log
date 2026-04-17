@@ -1,0 +1,732 @@
+=== T3.1 — drs showrepl (Samba side) ===
+Default-First-Site-Name\SAMBA-DC1
+DSA Options: 0x00000001
+DSA object GUID: 0f681b9d-0958-439b-8de5-4782d98718cb
+DSA invocationId: d4adcbf0-7cd7-4d67-bf53-6068f99a7054
+
+==== INBOUND NEIGHBORS ====
+
+DC=DomainDnsZones,DC=lab,DC=test
+	Default-First-Site-Name\WS2025-DC1 via RPC
+		DSA object GUID: 7e6ee406-b9c0-4dc1-8590-b9c939156fbb
+		Last attempt @ Thu Apr 16 22:26:58 2026 PDT was successful
+		0 consecutive failure(s).
+		Last success @ Thu Apr 16 22:26:58 2026 PDT
+
+CN=Schema,CN=Configuration,DC=lab,DC=test
+	Default-First-Site-Name\WS2025-DC1 via RPC
+		DSA object GUID: 7e6ee406-b9c0-4dc1-8590-b9c939156fbb
+		Last attempt @ Thu Apr 16 22:26:58 2026 PDT was successful
+		0 consecutive failure(s).
+		Last success @ Thu Apr 16 22:26:58 2026 PDT
+
+DC=ForestDnsZones,DC=lab,DC=test
+	Default-First-Site-Name\WS2025-DC1 via RPC
+		DSA object GUID: 7e6ee406-b9c0-4dc1-8590-b9c939156fbb
+		Last attempt @ Thu Apr 16 22:26:58 2026 PDT was successful
+		0 consecutive failure(s).
+		Last success @ Thu Apr 16 22:26:58 2026 PDT
+
+CN=Configuration,DC=lab,DC=test
+	Default-First-Site-Name\WS2025-DC1 via RPC
+		DSA object GUID: 7e6ee406-b9c0-4dc1-8590-b9c939156fbb
+		Last attempt @ Thu Apr 16 22:26:58 2026 PDT was successful
+		0 consecutive failure(s).
+		Last success @ Thu Apr 16 22:26:58 2026 PDT
+
+DC=lab,DC=test
+	Default-First-Site-Name\WS2025-DC1 via RPC
+		DSA object GUID: 7e6ee406-b9c0-4dc1-8590-b9c939156fbb
+		Last attempt @ Thu Apr 16 22:27:00 2026 PDT was successful
+		0 consecutive failure(s).
+		Last success @ Thu Apr 16 22:27:00 2026 PDT
+
+==== OUTBOUND NEIGHBORS ====
+
+==== KCC CONNECTION OBJECTS ====
+
+Connection --
+	Connection name: 43682c76-3763-4c07-a3ee-e07dddcc6f41
+	Enabled        : TRUE
+	Server DNS name : WS2025-DC1.lab.test
+	Server DN name  : CN=NTDS Settings,CN=WS2025-DC1,CN=Servers,CN=Default-First-Site-Name,CN=Sites,CN=Configuration,DC=lab,DC=test
+		TransportType: RPC
+		options: 0x00000001
+Warning: No NC replicated for Connection!
+=== T3.2 - Get-ADDomainController (WS2025 side) ===
+
+[32;1mName      [0m[32;1m HostName           [0m[32;1m IPv4Address[0m[32;1m OperatingSystem[0m
+[32;1m----      [0m [32;1m--------           [0m [32;1m-----------[0m [32;1m---------------[0m
+WS2025-DC1 WS2025-DC1.lab.test 172.22.0.10 Windows Server 2025 Standard Evaluation
+SAMBA-DC1  samba-dc1.lab.test  172.22.0.20 
+
+=== T3.3 - repadmin /showrepl ===
+
+
+Repadmin: running command /showrepl against full DC localhost
+
+Default-First-Site-Name\WS2025-DC1
+
+DSA Options: IS_GC 
+
+Site Options: (none)
+
+DSA object GUID: 7e6ee406-b9c0-4dc1-8590-b9c939156fbb
+
+DSA invocationID: 7e6ee406-b9c0-4dc1-8590-b9c939156fbb
+
+
+
+
+
+Source: Default-First-Site-Name\SAMBA-DC1
+
+******* 2 CONSECUTIVE FAILURES since 2026-04-16 22:25:43
+
+Last error: 8524 (0x214c):
+
+            The DSA operation is unable to proceed because of a DNS lookup failure.
+
+
+
+Naming Context: DC=ForestDnsZones,DC=lab,DC=test
+
+Source: Default-First-Site-Name\SAMBA-DC1
+
+******* WARNING: KCC could not add this REPLICA LINK due to error.
+
+
+
+Naming Context: DC=DomainDnsZones,DC=lab,DC=test
+
+Source: Default-First-Site-Name\SAMBA-DC1
+
+******* WARNING: KCC could not add this REPLICA LINK due to error.
+
+
+
+Naming Context: CN=Schema,CN=Configuration,DC=lab,DC=test
+
+Source: Default-First-Site-Name\SAMBA-DC1
+
+******* WARNING: KCC could not add this REPLICA LINK due to error.
+
+
+
+Naming Context: CN=Configuration,DC=lab,DC=test
+
+Source: Default-First-Site-Name\SAMBA-DC1
+
+******* WARNING: KCC could not add this REPLICA LINK due to error.
+
+
+
+Naming Context: DC=lab,DC=test
+
+Source: Default-First-Site-Name\SAMBA-DC1
+
+******* WARNING: KCC could not add this REPLICA LINK due to error.
+
+
+
+
+=== T3.4 - nltest /dsgetdc:lab.test ===
+           DC: \\WS2025-DC1.lab.test
+      Address: \\172.22.0.10
+     Dom Guid: d07c2c53-afe6-48c0-963c-cae3c631dbc8
+     Dom Name: lab.test
+  Forest Name: lab.test
+ Dc Site Name: Default-First-Site-Name
+Our Site Name: Default-First-Site-Name
+        Flags: PDC GC DS LDAP KDC WRITABLE DNS_DC DNS_DOMAIN DNS_FOREST CLOSE_SITE FULL_SECRET WS DS_8 DS_9 DS_10 KEYLIST DS_13
+The command completed successfully
+
+=== T3.5 - DNS A records for SAMBA-DC1 ===
+
+[32;1mHostName [0m[32;1m RecordType[0m[32;1m Data[0m
+[32;1m-------- [0m [32;1m----------[0m [32;1m----[0m
+SAMBA-DC1 A          172.22.0.20
+
+=== samba_dnsupdate (on Samba) ===
+IPs: ['172.22.0.20']
+Looking for DNS entry A samba-dc1.lab.test 172.22.0.20 as samba-dc1.lab.test.
+Looking for DNS entry CNAME 0f681b9d-0958-439b-8de5-4782d98718cb._msdcs.lab.test samba-dc1.lab.test as 0f681b9d-0958-439b-8de5-4782d98718cb._msdcs.lab.test.
+Looking for DNS entry NS lab.test samba-dc1.lab.test as lab.test.
+Looking for DNS entry NS _msdcs.lab.test samba-dc1.lab.test as _msdcs.lab.test.
+Looking for DNS entry A lab.test 172.22.0.20 as lab.test.
+Looking for DNS entry SRV _ldap._tcp.lab.test samba-dc1.lab.test 389 as _ldap._tcp.lab.test.
+Checking 0 100 389 ws2025-dc1.lab.test. against SRV _ldap._tcp.lab.test samba-dc1.lab.test 389
+Checking 0 100 389 samba-dc1.lab.test. against SRV _ldap._tcp.lab.test samba-dc1.lab.test 389
+Looking for DNS entry SRV _ldap._tcp.dc._msdcs.lab.test samba-dc1.lab.test 389 as _ldap._tcp.dc._msdcs.lab.test.
+Checking 0 100 389 ws2025-dc1.lab.test. against SRV _ldap._tcp.dc._msdcs.lab.test samba-dc1.lab.test 389
+Checking 0 100 389 samba-dc1.lab.test. against SRV _ldap._tcp.dc._msdcs.lab.test samba-dc1.lab.test 389
+Looking for DNS entry SRV _ldap._tcp.d07c2c53-afe6-48c0-963c-cae3c631dbc8.domains._msdcs.lab.test samba-dc1.lab.test 389 as _ldap._tcp.d07c2c53-afe6-48c0-963c-cae3c631dbc8.domains._msdcs.lab.test.
+Checking 0 100 389 ws2025-dc1.lab.test. against SRV _ldap._tcp.d07c2c53-afe6-48c0-963c-cae3c631dbc8.domains._msdcs.lab.test samba-dc1.lab.test 389
+Checking 0 100 389 samba-dc1.lab.test. against SRV _ldap._tcp.d07c2c53-afe6-48c0-963c-cae3c631dbc8.domains._msdcs.lab.test samba-dc1.lab.test 389
+Looking for DNS entry SRV _kerberos._tcp.lab.test samba-dc1.lab.test 88 as _kerberos._tcp.lab.test.
+Checking 0 100 88 ws2025-dc1.lab.test. against SRV _kerberos._tcp.lab.test samba-dc1.lab.test 88
+Checking 0 100 88 samba-dc1.lab.test. against SRV _kerberos._tcp.lab.test samba-dc1.lab.test 88
+Looking for DNS entry SRV _kerberos._udp.lab.test samba-dc1.lab.test 88 as _kerberos._udp.lab.test.
+Checking 0 100 88 ws2025-dc1.lab.test. against SRV _kerberos._udp.lab.test samba-dc1.lab.test 88
+Checking 0 100 88 samba-dc1.lab.test. against SRV _kerberos._udp.lab.test samba-dc1.lab.test 88
+Looking for DNS entry SRV _kerberos._tcp.dc._msdcs.lab.test samba-dc1.lab.test 88 as _kerberos._tcp.dc._msdcs.lab.test.
+Checking 0 100 88 ws2025-dc1.lab.test. against SRV _kerberos._tcp.dc._msdcs.lab.test samba-dc1.lab.test 88
+Checking 0 100 88 samba-dc1.lab.test. against SRV _kerberos._tcp.dc._msdcs.lab.test samba-dc1.lab.test 88
+Looking for DNS entry SRV _kpasswd._tcp.lab.test samba-dc1.lab.test 464 as _kpasswd._tcp.lab.test.
+Checking 0 100 464 ws2025-dc1.lab.test. against SRV _kpasswd._tcp.lab.test samba-dc1.lab.test 464
+Checking 0 100 464 samba-dc1.lab.test. against SRV _kpasswd._tcp.lab.test samba-dc1.lab.test 464
+Looking for DNS entry SRV _kpasswd._udp.lab.test samba-dc1.lab.test 464 as _kpasswd._udp.lab.test.
+Checking 0 100 464 ws2025-dc1.lab.test. against SRV _kpasswd._udp.lab.test samba-dc1.lab.test 464
+Checking 0 100 464 samba-dc1.lab.test. against SRV _kpasswd._udp.lab.test samba-dc1.lab.test 464
+Looking for DNS entry SRV _ldap._tcp.Default-First-Site-Name._sites.lab.test samba-dc1.lab.test 389 as _ldap._tcp.Default-First-Site-Name._sites.lab.test.
+Checking 0 100 389 ws2025-dc1.lab.test. against SRV _ldap._tcp.Default-First-Site-Name._sites.lab.test samba-dc1.lab.test 389
+Checking 0 100 389 samba-dc1.lab.test. against SRV _ldap._tcp.Default-First-Site-Name._sites.lab.test samba-dc1.lab.test 389
+Looking for DNS entry SRV _ldap._tcp.Default-First-Site-Name._sites.dc._msdcs.lab.test samba-dc1.lab.test 389 as _ldap._tcp.Default-First-Site-Name._sites.dc._msdcs.lab.test.
+Checking 0 100 389 ws2025-dc1.lab.test. against SRV _ldap._tcp.Default-First-Site-Name._sites.dc._msdcs.lab.test samba-dc1.lab.test 389
+Checking 0 100 389 samba-dc1.lab.test. against SRV _ldap._tcp.Default-First-Site-Name._sites.dc._msdcs.lab.test samba-dc1.lab.test 389
+Looking for DNS entry SRV _kerberos._tcp.Default-First-Site-Name._sites.lab.test samba-dc1.lab.test 88 as _kerberos._tcp.Default-First-Site-Name._sites.lab.test.
+Checking 0 100 88 ws2025-dc1.lab.test. against SRV _kerberos._tcp.Default-First-Site-Name._sites.lab.test samba-dc1.lab.test 88
+Checking 0 100 88 samba-dc1.lab.test. against SRV _kerberos._tcp.Default-First-Site-Name._sites.lab.test samba-dc1.lab.test 88
+Looking for DNS entry SRV _kerberos._tcp.Default-First-Site-Name._sites.dc._msdcs.lab.test samba-dc1.lab.test 88 as _kerberos._tcp.Default-First-Site-Name._sites.dc._msdcs.lab.test.
+Checking 0 100 88 ws2025-dc1.lab.test. against SRV _kerberos._tcp.Default-First-Site-Name._sites.dc._msdcs.lab.test samba-dc1.lab.test 88
+Checking 0 100 88 samba-dc1.lab.test. against SRV _kerberos._tcp.Default-First-Site-Name._sites.dc._msdcs.lab.test samba-dc1.lab.test 88
+Looking for DNS entry A gc._msdcs.lab.test 172.22.0.20 as gc._msdcs.lab.test.
+Looking for DNS entry SRV _gc._tcp.lab.test samba-dc1.lab.test 3268 as _gc._tcp.lab.test.
+Checking 0 100 3268 ws2025-dc1.lab.test. against SRV _gc._tcp.lab.test samba-dc1.lab.test 3268
+Checking 0 100 3268 samba-dc1.lab.test. against SRV _gc._tcp.lab.test samba-dc1.lab.test 3268
+Looking for DNS entry SRV _ldap._tcp.gc._msdcs.lab.test samba-dc1.lab.test 3268 as _ldap._tcp.gc._msdcs.lab.test.
+Checking 0 100 3268 ws2025-dc1.lab.test. against SRV _ldap._tcp.gc._msdcs.lab.test samba-dc1.lab.test 3268
+Checking 0 100 3268 samba-dc1.lab.test. against SRV _ldap._tcp.gc._msdcs.lab.test samba-dc1.lab.test 3268
+Looking for DNS entry SRV _gc._tcp.Default-First-Site-Name._sites.lab.test samba-dc1.lab.test 3268 as _gc._tcp.Default-First-Site-Name._sites.lab.test.
+Checking 0 100 3268 ws2025-dc1.lab.test. against SRV _gc._tcp.Default-First-Site-Name._sites.lab.test samba-dc1.lab.test 3268
+Checking 0 100 3268 samba-dc1.lab.test. against SRV _gc._tcp.Default-First-Site-Name._sites.lab.test samba-dc1.lab.test 3268
+Looking for DNS entry SRV _ldap._tcp.Default-First-Site-Name._sites.gc._msdcs.lab.test samba-dc1.lab.test 3268 as _ldap._tcp.Default-First-Site-Name._sites.gc._msdcs.lab.test.
+Checking 0 100 3268 ws2025-dc1.lab.test. against SRV _ldap._tcp.Default-First-Site-Name._sites.gc._msdcs.lab.test samba-dc1.lab.test 3268
+Checking 0 100 3268 samba-dc1.lab.test. against SRV _ldap._tcp.Default-First-Site-Name._sites.gc._msdcs.lab.test samba-dc1.lab.test 3268
+Looking for DNS entry A DomainDnsZones.lab.test 172.22.0.20 as DomainDnsZones.lab.test.
+Looking for DNS entry SRV _ldap._tcp.DomainDnsZones.lab.test samba-dc1.lab.test 389 as _ldap._tcp.DomainDnsZones.lab.test.
+Checking 0 100 389 ws2025-dc1.lab.test. against SRV _ldap._tcp.DomainDnsZones.lab.test samba-dc1.lab.test 389
+Checking 0 100 389 samba-dc1.lab.test. against SRV _ldap._tcp.DomainDnsZones.lab.test samba-dc1.lab.test 389
+Looking for DNS entry SRV _ldap._tcp.Default-First-Site-Name._sites.DomainDnsZones.lab.test samba-dc1.lab.test 389 as _ldap._tcp.Default-First-Site-Name._sites.DomainDnsZones.lab.test.
+---
+=== check Samba DNS registrations ===
+  Name=SAMBA-DC1, Records=1, Children=0
+---
+=== _msdcs.lab.test CNAME for Samba GUID ===
+SAMBA-DC1.lab.test.
+---
+=== _ldap._tcp.Default-First-Site-Name._sites.dc._msdcs.lab.test ===
+0 100 389 ws2025-dc1.lab.test.
+---
+=== SRV records at WS2025 after dnsupdate ===
+0 100 389 ws2025-dc1.lab.test.
+---
+0 100 88 ws2025-dc1.lab.test.
+---
+=== CNAME and A ===
+SAMBA-DC1.lab.test.
+172.22.0.20
+172.22.0.20
+=== samba_dnsupdate exit + errors ===
+Looking for DNS entry SRV _ldap._tcp.Default-First-Site-Name._sites.lab.test samba-dc1.lab.test 389 as _ldap._tcp.Default-First-Site-Name._sites.lab.test.
+Checking 0 100 389 ws2025-dc1.lab.test. against SRV _ldap._tcp.Default-First-Site-Name._sites.lab.test samba-dc1.lab.test 389
+Checking 0 100 389 samba-dc1.lab.test. against SRV _ldap._tcp.Default-First-Site-Name._sites.lab.test samba-dc1.lab.test 389
+Looking for DNS entry SRV _ldap._tcp.Default-First-Site-Name._sites.dc._msdcs.lab.test samba-dc1.lab.test 389 as _ldap._tcp.Default-First-Site-Name._sites.dc._msdcs.lab.test.
+Checking 0 100 389 ws2025-dc1.lab.test. against SRV _ldap._tcp.Default-First-Site-Name._sites.dc._msdcs.lab.test samba-dc1.lab.test 389
+Checking 0 100 389 samba-dc1.lab.test. against SRV _ldap._tcp.Default-First-Site-Name._sites.dc._msdcs.lab.test samba-dc1.lab.test 389
+Looking for DNS entry SRV _kerberos._tcp.Default-First-Site-Name._sites.lab.test samba-dc1.lab.test 88 as _kerberos._tcp.Default-First-Site-Name._sites.lab.test.
+Checking 0 100 88 ws2025-dc1.lab.test. against SRV _kerberos._tcp.Default-First-Site-Name._sites.lab.test samba-dc1.lab.test 88
+Checking 0 100 88 samba-dc1.lab.test. against SRV _kerberos._tcp.Default-First-Site-Name._sites.lab.test samba-dc1.lab.test 88
+Looking for DNS entry SRV _kerberos._tcp.Default-First-Site-Name._sites.dc._msdcs.lab.test samba-dc1.lab.test 88 as _kerberos._tcp.Default-First-Site-Name._sites.dc._msdcs.lab.test.
+Checking 0 100 88 ws2025-dc1.lab.test. against SRV _kerberos._tcp.Default-First-Site-Name._sites.dc._msdcs.lab.test samba-dc1.lab.test 88
+Checking 0 100 88 samba-dc1.lab.test. against SRV _kerberos._tcp.Default-First-Site-Name._sites.dc._msdcs.lab.test samba-dc1.lab.test 88
+Looking for DNS entry A gc._msdcs.lab.test 172.22.0.20 as gc._msdcs.lab.test.
+Looking for DNS entry SRV _gc._tcp.lab.test samba-dc1.lab.test 3268 as _gc._tcp.lab.test.
+Checking 0 100 3268 ws2025-dc1.lab.test. against SRV _gc._tcp.lab.test samba-dc1.lab.test 3268
+Checking 0 100 3268 samba-dc1.lab.test. against SRV _gc._tcp.lab.test samba-dc1.lab.test 3268
+Looking for DNS entry SRV _ldap._tcp.gc._msdcs.lab.test samba-dc1.lab.test 3268 as _ldap._tcp.gc._msdcs.lab.test.
+Checking 0 100 3268 ws2025-dc1.lab.test. against SRV _ldap._tcp.gc._msdcs.lab.test samba-dc1.lab.test 3268
+Checking 0 100 3268 samba-dc1.lab.test. against SRV _ldap._tcp.gc._msdcs.lab.test samba-dc1.lab.test 3268
+Looking for DNS entry SRV _gc._tcp.Default-First-Site-Name._sites.lab.test samba-dc1.lab.test 3268 as _gc._tcp.Default-First-Site-Name._sites.lab.test.
+Checking 0 100 3268 ws2025-dc1.lab.test. against SRV _gc._tcp.Default-First-Site-Name._sites.lab.test samba-dc1.lab.test 3268
+Checking 0 100 3268 samba-dc1.lab.test. against SRV _gc._tcp.Default-First-Site-Name._sites.lab.test samba-dc1.lab.test 3268
+Looking for DNS entry SRV _ldap._tcp.Default-First-Site-Name._sites.gc._msdcs.lab.test samba-dc1.lab.test 3268 as _ldap._tcp.Default-First-Site-Name._sites.gc._msdcs.lab.test.
+Checking 0 100 3268 ws2025-dc1.lab.test. against SRV _ldap._tcp.Default-First-Site-Name._sites.gc._msdcs.lab.test samba-dc1.lab.test 3268
+Checking 0 100 3268 samba-dc1.lab.test. against SRV _ldap._tcp.Default-First-Site-Name._sites.gc._msdcs.lab.test samba-dc1.lab.test 3268
+Looking for DNS entry A DomainDnsZones.lab.test 172.22.0.20 as DomainDnsZones.lab.test.
+Looking for DNS entry SRV _ldap._tcp.DomainDnsZones.lab.test samba-dc1.lab.test 389 as _ldap._tcp.DomainDnsZones.lab.test.
+Checking 0 100 389 ws2025-dc1.lab.test. against SRV _ldap._tcp.DomainDnsZones.lab.test samba-dc1.lab.test 389
+Checking 0 100 389 samba-dc1.lab.test. against SRV _ldap._tcp.DomainDnsZones.lab.test samba-dc1.lab.test 389
+Looking for DNS entry SRV _ldap._tcp.Default-First-Site-Name._sites.DomainDnsZones.lab.test samba-dc1.lab.test 389 as _ldap._tcp.Default-First-Site-Name._sites.DomainDnsZones.lab.test.
+Checking 0 100 389 ws2025-dc1.lab.test. against SRV _ldap._tcp.Default-First-Site-Name._sites.DomainDnsZones.lab.test samba-dc1.lab.test 389
+Checking 0 100 389 samba-dc1.lab.test. against SRV _ldap._tcp.Default-First-Site-Name._sites.DomainDnsZones.lab.test samba-dc1.lab.test 389
+Looking for DNS entry A ForestDnsZones.lab.test 172.22.0.20 as ForestDnsZones.lab.test.
+Looking for DNS entry SRV _ldap._tcp.ForestDnsZones.lab.test samba-dc1.lab.test 389 as _ldap._tcp.ForestDnsZones.lab.test.
+Checking 0 100 389 ws2025-dc1.lab.test. against SRV _ldap._tcp.ForestDnsZones.lab.test samba-dc1.lab.test 389
+Checking 0 100 389 samba-dc1.lab.test. against SRV _ldap._tcp.ForestDnsZones.lab.test samba-dc1.lab.test 389
+Looking for DNS entry SRV _ldap._tcp.Default-First-Site-Name._sites.ForestDnsZones.lab.test samba-dc1.lab.test 389 as _ldap._tcp.Default-First-Site-Name._sites.ForestDnsZones.lab.test.
+Checking 0 100 389 ws2025-dc1.lab.test. against SRV _ldap._tcp.Default-First-Site-Name._sites.ForestDnsZones.lab.test samba-dc1.lab.test 389
+Checking 0 100 389 samba-dc1.lab.test. against SRV _ldap._tcp.Default-First-Site-Name._sites.ForestDnsZones.lab.test samba-dc1.lab.test 389
+No DNS updates needed
+---
+=== Samba local DNS records for _ldap._tcp.dc._msdcs ===
+0 100 389 ws2025-dc1.lab.test.
+0 100 389 samba-dc1.lab.test.
+---
+=== Samba local A records for samba-dc1 ===
+172.22.0.20
+---
+=== query WS2025 DNS for samba-dc1 SRV (should include both DCs) ===
+0 100 389 ws2025-dc1.lab.test.
+---
+=== DNS failure - what does WS2025 think? ===
+Server:		172.22.0.10
+Address:	172.22.0.10#53
+
+Name:	samba-dc1.lab.test
+Address: 172.22.0.20
+
+=== force outbound replication Samba → WS2025 (all partitions) ===
+--- pushing DC=lab,DC=test ---
+Partition[DC=lab,DC=test] objects[0] linked_values[0]
+Incremental replication of 0 objects and 0 links from SAMBA-DC1 to tdb:///var/lib/samba/private/sam.ldb was successful.
+--- pushing CN=Configuration,DC=lab,DC=test ---
+Partition[CN=Configuration,DC=lab,DC=test] objects[0] linked_values[0]
+Incremental replication of 0 objects and 0 links from SAMBA-DC1 to tdb:///var/lib/samba/private/sam.ldb was successful.
+--- pushing CN=Schema,CN=Configuration,DC=lab,DC=test ---
+Partition[CN=Schema,CN=Configuration,DC=lab,DC=test] objects[0] linked_values[0]
+Incremental replication of 0 objects and 0 links from SAMBA-DC1 to tdb:///var/lib/samba/private/sam.ldb was successful.
+--- pushing DC=DomainDnsZones,DC=lab,DC=test ---
+Partition[DC=DomainDnsZones,DC=lab,DC=test] objects[0] linked_values[0]
+Incremental replication of 0 objects and 0 links from SAMBA-DC1 to tdb:///var/lib/samba/private/sam.ldb was successful.
+--- pushing DC=ForestDnsZones,DC=lab,DC=test ---
+Partition[DC=ForestDnsZones,DC=lab,DC=test] objects[0] linked_values[0]
+Incremental replication of 0 objects and 0 links from SAMBA-DC1 to tdb:///var/lib/samba/private/sam.ldb was successful.
+=== resolve samba-dc1 from WS2025 ===
+DNS request timed out.
+    timeout was 2 seconds.
+Server:  UnKnown
+Address:  ::1
+
+Name:    samba-dc1.lab.test
+Address:  172.22.0.20
+
+
+=== resolve GUID CNAME from WS2025 ===
+DNS request timed out.
+    timeout was 2 seconds.
+Server:  UnKnown
+Address:  ::1
+
+Name:    SAMBA-DC1.lab.test
+Address:  172.22.0.20
+Aliases:  0f681b9d-0958-439b-8de5-4782d98718cb._msdcs.lab.test
+
+
+=== ping samba-dc1 ===
+
+Pinging samba-dc1.lab.test [172.22.0.20] with 32 bytes of data:
+Reply from 172.22.0.20: bytes=32 time<1ms TTL=64
+Reply from 172.22.0.20: bytes=32 time<1ms TTL=64
+
+Ping statistics for 172.22.0.20:
+    Packets: Sent = 2, Received = 2, Lost = 0 (0% loss),
+Approximate round trip times in milli-seconds:
+    Minimum = 0ms, Maximum = 0ms, Average = 0ms
+
+=== repadmin /replicate WS2025-DC1 SAMBA-DC1 DC=lab,DC=test ===
+DsReplicaSync() failed with status 8452 (0x2104):
+
+    The naming context is in the process of being removed or is not replicated from the specified server.
+
+
+
+
+=== repadmin /showrepl /errorsonly ===
+
+
+Repadmin: running command /showrepl against full DC localhost
+
+Default-First-Site-Name\WS2025-DC1
+
+DSA Options: IS_GC 
+
+Site Options: (none)
+
+DSA object GUID: 7e6ee406-b9c0-4dc1-8590-b9c939156fbb
+
+DSA invocationID: 7e6ee406-b9c0-4dc1-8590-b9c939156fbb
+
+
+
+
+
+Source: Default-First-Site-Name\SAMBA-DC1
+
+******* 2 CONSECUTIVE FAILURES since 2026-04-16 22:25:43
+
+Last error: 8524 (0x214c):
+
+            The DSA operation is unable to proceed because of a DNS lookup failure.
+
+
+
+Naming Context: DC=ForestDnsZones,DC=lab,DC=test
+
+Source: Default-First-Site-Name\SAMBA-DC1
+
+******* WARNING: KCC could not add this REPLICA LINK due to error.
+
+
+
+Naming Context: DC=DomainDnsZones,DC=lab,DC=test
+
+Source: Default-First-Site-Name\SAMBA-DC1
+
+******* WARNING: KCC could not add this REPLICA LINK due to error.
+
+
+
+Naming Context: CN=Schema,CN=Configuration,DC=lab,DC=test
+
+Source: Default-First-Site-Name\SAMBA-DC1
+
+******* WARNING: KCC could not add this REPLICA LINK due to error.
+
+
+
+Naming Context: CN=Configuration,DC=lab,DC=test
+
+Source: Default-First-Site-Name\SAMBA-DC1
+
+******* WARNING: KCC could not add this REPLICA LINK due to error.
+
+
+
+Naming Context: DC=lab,DC=test
+
+Source: Default-First-Site-Name\SAMBA-DC1
+
+******* WARNING: KCC could not add this REPLICA LINK due to error.
+
+
+
+
+=== dcdiag /test:dns /s:WS2025-DC1 ===
+=== WS2025 event log: DirectoryService KCC errors (last 10 min) ===
+
+[32;1mTimeCreated      : [0m4/16/2026 10:25:45 PM
+[32;1mId               : [0m1925
+[32;1mLevelDisplayName : [0mWarning
+[32;1mMsg              : [0mThe attempt to establish a replication link for the following writable directory partition failed. 
+                    
+                   Directory partition: 
+                   DC=ForestDnsZones,DC=lab,DC=test 
+                   Source directory service: 
+                   CN=NTDS Settings,CN=SAMBA-DC1,CN=Servers,CN=Default-First-Site-Name,CN=Sites,CN=Configuration,DC=lab
+                   ,DC=test 
+                   Source directory service address: 
+                   0f681b9d-0958-439b-8de5-4782d98718cb._msdcs.lab.test 
+                   Intersit
+
+[32;1mTimeCreated      : [0m4/16/2026 10:25:43 PM
+[32;1mId               : [0m1925
+[32;1mLevelDisplayName : [0mWarning
+[32;1mMsg              : [0mThe attempt to establish a replication link for the following writable directory partition failed. 
+                    
+                   Directory partition: 
+                   DC=DomainDnsZones,DC=lab,DC=test 
+                   Source directory service: 
+                   CN=NTDS Settings,CN=SAMBA-DC1,CN=Servers,CN=Default-First-Site-Name,CN=Sites,CN=Configuration,DC=lab
+                   ,DC=test 
+                   Source directory service address: 
+                   0f681b9d-0958-439b-8de5-4782d98718cb._msdcs.lab.test 
+                   Intersit
+
+[32;1mTimeCreated      : [0m4/16/2026 10:25:38 PM
+[32;1mId               : [0m1128
+[32;1mLevelDisplayName : [0mInformation
+[32;1mMsg              : [0mA replication connection was created from the following source directory service to the local 
+                   directory service. 
+                    
+                   Source directory service:
+                   CN=NTDS Settings,CN=SAMBA-DC1,CN=Servers,CN=Default-First-Site-Name,CN=Sites,CN=Configuration,DC=lab
+                   ,DC=test 
+                   Local directory service:
+                   CN=NTDS Settings,CN=WS2025-DC1,CN=Servers,CN=Default-First-Site-Name,CN=Sites,CN=Configuration,DC=la
+                   b,DC=test 
+                    
+                   Add
+
+[32;1mTimeCreated      : [0m4/16/2026 2:17:28 PM
+[32;1mId               : [0m1869
+[32;1mLevelDisplayName : [0mInformation
+[32;1mMsg              : [0mActive Directory Domain Services has located a global catalog in the following site. 
+                    
+                   Global catalog:
+                   \\WS2025-DC1.lab.test 
+                   Site:
+                   Default-First-Site-Name
+
+[32;1mTimeCreated      : [0m4/16/2026 2:00:30 PM
+[32;1mId               : [0m1898
+[32;1mLevelDisplayName : [0mInformation
+[32;1mMsg              : [0mInternal event: The following schema object was modified. 
+                    
+                   Schema object: 
+                   CN=domain-dns,CN=Schema,CN=Configuration,DC=lab,DC=test
+
+
+=== repadmin /showconn WS2025-DC1 (connection objects) ===
+Base DN: CN=Default-First-Site-Name,CN=Sites,CN=Configuration,DC=lab,DC=test
+
+==== KCC CONNECTION OBJECTS ============================================
+
+Connection --
+
+    Connection name : 84fd8165-0346-4146-b2b3-78d6e068211d
+
+    Server DNS name : WS2025-DC1.lab.test
+
+    Server DN  name : CN=NTDS Settings,CN=WS2025-DC1,CN=Servers,CN=Default-First-Site-Name,CN=Sites,CN=Configuration,DC=lab,DC=test
+
+        Source: Default-First-Site-Name\SAMBA-DC1
+
+******* 2 CONSECUTIVE FAILURES since 2026-04-16 22:25:43
+
+Last error: 8524 (0x214c):
+
+            The DSA operation is unable to proceed because of a DNS lookup failure.
+
+        TransportType: intrasite RPC
+
+        options:  isGenerated
+
+        ReplicatesNC: DC=ForestDnsZones,DC=lab,DC=test
+
+        Reason:  RingTopology
+
+******* WARNING: KCC could not add this REPLICA LINK due to error.
+
+        ReplicatesNC: DC=DomainDnsZones,DC=lab,DC=test
+
+        Reason:  RingTopology
+
+******* WARNING: KCC could not add this REPLICA LINK due to error.
+
+        ReplicatesNC: CN=Schema,CN=Configuration,DC=lab,DC=test
+
+        Reason:  RingTopology
+
+
+=== repadmin /showrepl /csv ===
+
+=== repadmin /replicate by GUID ===
+DsReplicaSync() failed with status 8452 (0x2104):
+
+    The naming context is in the process of being removed or is not replicated from the specified server.
+
+
+
+
+=== Forward lookup timing ===
+GUID CNAME lookup: 600ms -> SAMBA-DC1.lab.test
+samba-dc1 A lookup: 2ms -> 172.22.0.20
+
+               1 test failure on this DNS server
+
+               PTR record query for the 1.0.0.127.in-addr.arpa. failed on the DNS server 199.7.83.42               
+            DNS server: 199.7.91.13 (D.ROOT-SERVERS.NET.)
+
+               1 test failure on this DNS server
+
+               PTR record query for the 1.0.0.127.in-addr.arpa. failed on the DNS server 199.7.91.13               
+            DNS server: 202.12.27.33 (M.ROOT-SERVERS.NET.)
+
+               1 test failure on this DNS server
+
+               PTR record query for the 1.0.0.127.in-addr.arpa. failed on the DNS server 202.12.27.33               
+            DNS server: 8.8.8.8 (<name unavailable>)
+
+               1 test failure on this DNS server
+
+               PTR record query for the 1.0.0.127.in-addr.arpa. failed on the DNS server 8.8.8.8               
+         Summary of DNS test results:
+
+         
+                                            Auth Basc Forw Del  Dyn  RReg Ext
+            _________________________________________________________________
+            Domain: lab.test
+
+               WS2025-DC1                   PASS PASS FAIL PASS PASS PASS n/a  
+         
+         ......................... lab.test failed test DNS
+
+=== reverse PTR check for samba-dc1 at WS2025 ===
+WS2025-DC1.lab.test.
+---
+=== full Directory Service event 1925 (ForestDnsZones, most recent) ===
+ssh: Could not resolve hostname server: No address associated with hostname
+=== Full Event 1925 message ===
+The attempt to establish a replication link for the following writable directory partition failed. 
+ 
+Directory partition: 
+DC=ForestDnsZones,DC=lab,DC=test 
+Source directory service: 
+CN=NTDS Settings,CN=SAMBA-DC1,CN=Servers,CN=Default-First-Site-Name,CN=Sites,CN=Configuration,DC=lab,DC=test 
+Source directory service address: 
+0f681b9d-0958-439b-8de5-4782d98718cb._msdcs.lab.test 
+Intersite transport (if any): 
+ 
+ 
+This directory service will be unable to replicate with the source directory service until this problem is corrected. 
+ 
+User Action 
+Verify if the source directory service is accessible or network connectivity is available. 
+ 
+Additional Data 
+Error value: 
+8524 The DSA operation is unable to proceed because of a DNS lookup failure.
+
+=== Any other related events in last 30 min ===
+
+[32;1mTimeCreated      : [0m4/16/2026 10:25:45 PM
+[32;1mId               : [0m1925
+[32;1mLevelDisplayName : [0mWarning
+[32;1mMsg              : [0mThe attempt to establish a replication link for the following writable directory partition failed. 
+                    
+                   Directory partition: 
+                   DC=ForestDnsZones,DC=lab,DC=test 
+                   Source directory service: 
+                   CN=NTDS Settings,CN=SAMBA-DC1,CN=Servers,CN=Default-First-Si
+
+[32;1mTimeCreated      : [0m4/16/2026 10:25:43 PM
+[32;1mId               : [0m1925
+[32;1mLevelDisplayName : [0mWarning
+[32;1mMsg              : [0mThe attempt to establish a replication link for the following writable directory partition failed. 
+                    
+                   Directory partition: 
+                   DC=DomainDnsZones,DC=lab,DC=test 
+                   Source directory service: 
+                   CN=NTDS Settings,CN=SAMBA-DC1,CN=Servers,CN=Default-First-Si
+
+
+=== Check reverse zones on WS2025 DNS ===
+
+[32;1mZoneName             [0m[32;1m ZoneType[0m[32;1m IsDsIntegrated[0m
+[32;1m--------             [0m [32;1m--------[0m [32;1m--------------[0m
+0.22.172.in-addr.arpa Primary            True
+0.in-addr.arpa        Primary           False
+127.in-addr.arpa      Primary           False
+255.in-addr.arpa      Primary           False
+
+
+=== PTR in 0.22.172.in-addr.arpa zone ===
+
+[32;1mHostName[0m[32;1m RecordType[0m[32;1m Data[0m
+[32;1m--------[0m [32;1m----------[0m [32;1m----[0m
+10       PTR        WS2025-DC1.lab.test.
+
+=== Adding PTR for samba-dc1 (172.22.0.20) ===
+=== PTR records now ===
+
+[32;1mHostName[0m[32;1m RecordType[0m[32;1m Data[0m
+[32;1m--------[0m [32;1m----------[0m [32;1m----[0m
+10       PTR        WS2025-DC1.lab.test.
+20       PTR        samba-dc1.lab.test.
+
+=== Force KCC to retry + replicate now ===
+
+Consistency check on WS2025-DC1 successful.
+
+
+
+--- repadmin /replicate attempt 2 ---
+Sync from SAMBA-DC1 to WS2025-DC1 completed successfully.
+
+
+
+
+=== /showrepl /errorsonly ===
+
+
+Repadmin: running command /showrepl against full DC localhost
+
+Default-First-Site-Name\WS2025-DC1
+
+DSA Options: IS_GC 
+
+Site Options: (none)
+
+DSA object GUID: 7e6ee406-b9c0-4dc1-8590-b9c939156fbb
+
+DSA invocationID: 7e6ee406-b9c0-4dc1-8590-b9c939156fbb
+
+
+
+==== INBOUND NEIGHBORS ======================================
+
+
+
+=== repadmin /replsummary ===
+Replication Summary Start Time: 2026-04-16 22:37:25
+
+
+
+Beginning data collection for replication summary, this may take awhile:
+
+  .....
+
+
+
+
+
+Source DSA          largest delta    fails/total %%   error
+
+ SAMBA-DC1                    :22s    0 /   5    0  
+
+ WS2025-DC1                   :27s    0 /   5    0  
+
+
+
+
+
+Destination DSA     largest delta    fails/total %%   error
+
+ SAMBA-DC1                    :27s    0 /   5    0  
+
+ WS2025-DC1                   :22s    0 /   5    0  
+
+
+
+
+
+
+=== replicate all remaining NCs ===
+--- replicate CN=Configuration,DC=lab,DC=test ---
+Sync from SAMBA-DC1 to WS2025-DC1 completed successfully.
+
+
+--- replicate CN=Schema,CN=Configuration,DC=lab,DC=test ---
+Sync from SAMBA-DC1 to WS2025-DC1 completed successfully.
+
+
+--- replicate DC=DomainDnsZones,DC=lab,DC=test ---
+Sync from SAMBA-DC1 to WS2025-DC1 completed successfully.
+
+
+--- replicate DC=ForestDnsZones,DC=lab,DC=test ---
+Sync from SAMBA-DC1 to WS2025-DC1 completed successfully.
+
+
+
+=== final /showrepl /errorsonly ===
+No errors. Healthy.
+
+=== Get-ADDomainController final ===
+
+[32;1mName      [0m[32;1m OperatingSystem                        [0m[32;1m IPv4Address[0m[32;1m Site[0m
+[32;1m----      [0m [32;1m---------------                        [0m [32;1m-----------[0m [32;1m----[0m
+WS2025-DC1 Windows Server 2025 Standard Evaluation 172.22.0.10 Default-First-Site-Name
+SAMBA-DC1                                          172.22.0.20 Default-First-Site-Name
+

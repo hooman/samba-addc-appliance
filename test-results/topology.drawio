@@ -1,0 +1,74 @@
+<mxfile host="Electron" agent="Claude Code" type="device">
+  <diagram id="samba-topology" name="Samba AD Lab Topology &amp; Flow">
+    <mxGraphModel dx="1400" dy="900" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1100" pageHeight="850" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="title" value="Samba AD DC Appliance — Test Lab Topology &amp;amp; Flow" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=16;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="300" y="5" width="500" height="30" as="geometry"/>
+        </mxCell>
+        <mxCell id="mac" value="&lt;b&gt;Mac&lt;/b&gt; (Claude Code operator)&#10;~/.ssh/id_ed25519 → nmadmin@server&#10;                          → debadmin@172.22.0.20" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;align=center;verticalAlign=middle" vertex="1" parent="1">
+          <mxGeometry x="420" y="42" width="260" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="host" value="Hyper-V Host — &#39;server&#39; (Windows Server 2025, PowerShell 7.6)&#10;D:\ISO = /Volumes/ISO   ·   D:\Lab\ holds VM VHDX files" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;verticalAlign=top;fontStyle=1;fontSize=11;align=left;spacingLeft=10;spacingTop=8" vertex="1" parent="1">
+          <mxGeometry x="40" y="140" width="1020" height="410" as="geometry"/>
+        </mxCell>
+        <mxCell id="extsw" value="&lt;b&gt;External: PCI 1G Port 1&lt;/b&gt;&#10;&#10;TEMP — attached only during&#10;prepare-image (internet for apt);&#10;removed for golden-image snapshot" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;dashed=1;fontSize=10;align=center;verticalAlign=middle" vertex="1" parent="1">
+          <mxGeometry x="60" y="180" width="290" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="intsw" value="&lt;b&gt;Internal: Lab-Internal&lt;/b&gt;  (172.22.0.0/24, no NAT)&#10;Host vNIC: 172.22.0.1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;align=center;verticalAlign=middle" vertex="1" parent="1">
+          <mxGeometry x="380" y="180" width="660" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="wsdc" value="&lt;b&gt;WS2025-DC1&lt;/b&gt;  ·  172.22.0.10&#10;&#10;Windows Server 2025 Standard Eval&#10;Server Core · FFL = WinThreshold (2016)&#10;&#10;&lt;i&gt;lab.test&lt;/i&gt; forest root&#10;&#10;MSFT WS2025-2602 Security Baseline&#10;linked to OU=Domain Controllers&#10;(LDAP sign + channel binding, SMB sign,&#10;Kerberos AES, Defender, VBS, Domain Security)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;verticalAlign=top;fontSize=11;align=center;spacingTop=8" vertex="1" parent="1">
+          <mxGeometry x="80" y="285" width="430" height="250" as="geometry"/>
+        </mxCell>
+        <mxCell id="sambadc" value="&lt;b&gt;samba-dc1&lt;/b&gt;  ·  172.22.0.20&#10;&#10;Debian 13 Trixie (minimal)&#10;Samba 4.22.8 AD DC&#10;PowerShell 7.6 · chrony · hyperv-daemons&#10;&#10;Joined to &lt;i&gt;lab.test&lt;/i&gt; as additional DC&#10;&lt;code&gt;smb.conf: ad dc functional level = 2016&lt;/code&gt;&#10;&#10;samba-sconfig TUI at /usr/local/sbin/" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;verticalAlign=top;fontSize=11;align=center;spacingTop=8" vertex="1" parent="1">
+          <mxGeometry x="580" y="285" width="430" height="250" as="geometry"/>
+        </mxCell>
+        <mxCell id="arrM2H" value="ssh nmadmin@server&#10;(key-based, PowerShell 7.6)" style="endArrow=classic;html=1;labelBackgroundColor=#ffffff;fontSize=10;exitX=0.25;exitY=1;exitDx=0;exitDy=0;entryX=0.15;entryY=0;entryDx=0;entryDy=0" edge="1" parent="1" source="mac" target="host">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="arrM2S" value="ssh -J nmadmin@server&#10;debadmin@172.22.0.20" style="endArrow=classic;html=1;labelBackgroundColor=#ffffff;fontSize=10;dashed=1;strokeColor=#0066cc;strokeWidth=1.5;exitX=0.75;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0" edge="1" parent="1" source="mac" target="sambadc">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="795" y="130"/>
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="arrH2W" value="PSDirect&#10;(VMBus)" style="endArrow=classic;html=1;labelBackgroundColor=#ffffff;fontSize=10;exitX=0.3;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0" edge="1" parent="1" source="intsw" target="wsdc">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="arrRep" value="AD replication (DRSUAPI RPC)  ·  Kerberos  ·  LDAP(S)  ·  SMB  ·  DNS&#10;&lt;i&gt;bidirectional — after PTR record for 172.22.0.20 on WS2025&lt;/i&gt;" style="endArrow=classic;startArrow=classic;html=1;labelBackgroundColor=#ffffff;fontSize=10;strokeWidth=2;strokeColor=#b85450;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0" edge="1" parent="1" source="wsdc" target="sambadc">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="flowtitle" value="Test execution flow (single end-to-end pass)" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=12;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="40" y="565" width="400" height="20" as="geometry"/>
+        </mxCell>
+        <mxCell id="t1" value="&lt;b&gt;T1 — Smoke&lt;/b&gt;&#10;&#10;revert golden-image → boot&#10;services disabled ✓&#10;samba-sconfig present ✓&#10;pwsh 7.6 ✓&#10;&#10;&lt;i&gt;note: chrony NTP pools&#10;unreachable on isolated net&lt;/i&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;align=center;verticalAlign=top;spacingTop=8" vertex="1" parent="1">
+          <mxGeometry x="50" y="590" width="230" height="200" as="geometry"/>
+        </mxCell>
+        <mxCell id="t2" value="&lt;b&gt;T2 — Join WS2025 as DC&lt;/b&gt;&#10;&#10;1st attempt:&#10;&lt;font color=&quot;#b85450&quot;&gt;WERR_DS_INCOMPATIBLE_VERSION&lt;/font&gt;&#10;(OS-FL 4 vs forest-FL 7)&#10;&#10;&lt;b&gt;Fix:&lt;/b&gt; --option=&amp;quot;ad dc&#10;functional level = 2016&amp;quot;&#10;&#10;2nd attempt: &lt;b&gt;joined ✓&lt;/b&gt;&#10;samba-ad-dc active, TGT OK" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;align=center;verticalAlign=top;spacingTop=8" vertex="1" parent="1">
+          <mxGeometry x="300" y="590" width="230" height="200" as="geometry"/>
+        </mxCell>
+        <mxCell id="t3" value="&lt;b&gt;T3 — Replication + Functional&lt;/b&gt;&#10;&#10;inbound (WS→Samba): clean ✓&#10;outbound: &lt;font color=&quot;#b85450&quot;&gt;8524 DNS err&lt;/font&gt;&#10;&#10;&lt;b&gt;Fix:&lt;/b&gt; PTR 20 →&#10;samba-dc1.lab.test&#10;&#10;Users + GPO objects replicate ✓&#10;&lt;i&gt;SYSVOL: rsync fallback&#10;(Samba has no DFSR)&lt;/i&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;align=center;verticalAlign=top;spacingTop=8" vertex="1" parent="1">
+          <mxGeometry x="550" y="590" width="230" height="200" as="geometry"/>
+        </mxCell>
+        <mxCell id="t4" value="&lt;b&gt;T4 — Baseline compliance&lt;/b&gt;&#10;&#10;LDAP signing ✓&#10;SMB signing ✓&#10;Kerberos AES ✓&#10;&#10;&lt;font color=&quot;#cc6600&quot;&gt;RC4 still issuable&lt;/font&gt;&#10;(baseline gap, not Samba)&#10;&#10;LDAPS: self-signed,&#10;no SAN, 2y expiry" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;align=center;verticalAlign=top;spacingTop=8" vertex="1" parent="1">
+          <mxGeometry x="800" y="590" width="230" height="200" as="geometry"/>
+        </mxCell>
+        <mxCell id="flowEdge1" style="endArrow=classic;html=1;strokeWidth=1.5" edge="1" parent="1" source="t1" target="t2">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="flowEdge2" style="endArrow=classic;html=1;strokeWidth=1.5" edge="1" parent="1" source="t2" target="t3">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="flowEdge3" style="endArrow=classic;html=1;strokeWidth=1.5" edge="1" parent="1" source="t3" target="t4">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="legend" value="&lt;b&gt;Legend&lt;/b&gt;    &amp;#9632; Mac/operator    &amp;#9632; Windows (host &amp; VM)    &amp;#9632; Linux VM    &amp;#9632; Switch    &amp;#8213; bidirectional replication (after PTR fix)" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=9;fontStyle=2" vertex="1" parent="1">
+          <mxGeometry x="40" y="810" width="1020" height="20" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

@@ -1,0 +1,271 @@
+=== T2 pre-flight ===
+--- ping WS2025 ---
+PING 172.22.0.10 (172.22.0.10) 56(84) bytes of data.
+64 bytes from 172.22.0.10: icmp_seq=1 ttl=128 time=0.400 ms
+64 bytes from 172.22.0.10: icmp_seq=2 ttl=128 time=0.403 ms
+64 bytes from 172.22.0.10: icmp_seq=3 ttl=128 time=0.360 ms
+
+--- 172.22.0.10 ping statistics ---
+3 packets transmitted, 3 received, 0% packet loss, time 2028ms
+rtt min/avg/max/mdev = 0.360/0.387/0.403/0.019 ms
+--- DNS via WS2025 ---
+search lab.test
+nameserver 172.22.0.10
+ws2025-dc1.lab.test. hostmaster.lab.test. 21 900 600 86400 3600
+0 100 389 ws2025-dc1.lab.test.
+0 100 88 ws2025-dc1.lab.test.
+--- time sync setup ---
+server 172.22.0.10 iburst
+200 OK
+Reference ID    : 00000000 ()
+Stratum         : 0
+Ref time (UTC)  : Thu Jan 01 00:00:00 1970
+System time     : 0.000000000 seconds fast of NTP time
+Last offset     : +0.000000000 seconds
+--- date compare ---
+Local: Fri Apr 17 05:18:30 AM UTC 2026
+--- chrony sources ---
+
+  .-- Source mode  '^' = server, '=' = peer, '#' = local clock.
+ / .- Source state '*' = current best, '+' = combined, '-' = not combined,
+| /             'x' = may be in error, '~' = too variable, '?' = unusable.
+||                                                 .- xxxx [ yyyy ] +/- zzzz
+||      Reachability register (octal) -.           |  xxxx = adjusted offset,
+||      Log2(Polling interval) --.      |          |  yyyy = measured offset,
+||                                \     |          |  zzzz = estimated error.
+||                                 |    |           \
+MS Name/IP address         Stratum Poll Reach LastRx Last sample               
+===============================================================================
+^? WS2025-DC1.lab.test           0   6     0     -     +0ns[   +0ns] +/-    0ns
+200 OK
+Reference ID    : 00000000 ()
+Stratum         : 0
+Ref time (UTC)  : Thu Jan 01 00:00:00 1970
+System time     : 0.000000000 seconds fast of NTP time
+Last offset     : +0.000000000 seconds
+--- ntpdate style manual probe ---
+2026-04-17T05:18:56Z chronyd version 4.6.1 starting (+CMDMON +NTP +REFCLOCK +RTC +PRIVDROP +SCFILTER +SIGND +ASYNCDNS +NTS +SECHASH +IPV6 -DEBUG)
+2026-04-17T05:18:56Z Disabled control of system clock
+2026-04-17T05:19:01Z chronyd exiting
+
+[32;1mStatus  [0m[32;1m Name              [0m[32;1m DisplayName[0m
+[32;1m------  [0m [32;1m----              [0m [32;1m-----------[0m
+Running  w32time            Windows Time
+Leap Indicator: 3(not synchronized)
+Stratum: 0 (unspecified)
+Precision: -23 (119.209ns per tick)
+Root Delay: 0.0005215s
+Root Dispersion: 0.0274154s
+ReferenceId: 0x00000000 (unspecified)
+Last Successful Sync Time: 4/8/2026 7:39:01 PM
+Source: Free-running System Clock
+Poll Interval: 6 (64s)
+
+
+=== time comparison ===
+Mac now:   Fri Apr 17 05:19:29 UTC 2026
+Samba now: 2026-04-17 05:19:28
+2026-04-17 05:19:39
+2026-04-17 05:19:42
+=== T2 join execution ===
+[libdefaults]
+  default_realm = LAB.TEST
+  dns_lookup_kdc = true
+  dns_lookup_realm = false
+--- stop/mask any leftover samba, ensure no smb.conf ---
+--- performing: samba-tool domain join lab.test DC ---
+WARNING: Using passwords on command line is insecure. Installing the setproctitle python module will hide these from shortly after program start.
+INFO 2026-04-16 22:19:56,852 pid:1335 /usr/lib/python3/dist-packages/samba/join.py #104: Finding a writeable DC for domain 'lab.test'
+INFO 2026-04-16 22:19:56,866 pid:1335 /usr/lib/python3/dist-packages/samba/join.py #106: Found DC WS2025-DC1.lab.test
+INFO 2026-04-16 22:19:57,075 pid:1335 /usr/lib/python3/dist-packages/samba/join.py #1605: workgroup is LAB
+INFO 2026-04-16 22:19:57,075 pid:1335 /usr/lib/python3/dist-packages/samba/join.py #1608: realm is lab.test
+ERROR(runtime): uncaught exception - DsAddEntry failed
+  File "/usr/lib/python3/dist-packages/samba/netcmd/__init__.py", line 356, in _run
+    return self.run(*args, **kwargs)
+           ~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3/dist-packages/samba/netcmd/domain/join.py", line 128, in run
+    join_DC(logger=logger, server=server, creds=creds, lp=lp, domain=domain,
+    ~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+            site=site, netbios_name=netbios_name, targetdir=targetdir,
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<4 lines>...
+            backend_store=backend_store,
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+            backend_store_size=backend_store_size)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3/dist-packages/samba/join.py", line 1621, in join_DC
+    ctx.do_join()
+    ~~~~~~~~~~~^^
+  File "/usr/lib/python3/dist-packages/samba/join.py", line 1509, in do_join
+    ctx.join_add_objects()
+    ~~~~~~~~~~~~~~~~~~~~^^
+  File "/usr/lib/python3/dist-packages/samba/join.py", line 665, in join_add_objects
+    ctx.join_add_ntdsdsa()
+    ~~~~~~~~~~~~~~~~~~~~^^
+  File "/usr/lib/python3/dist-packages/samba/join.py", line 590, in join_add_ntdsdsa
+    ctx.DsAddEntry([rec])
+    ~~~~~~~~~~~~~~^^^^^^^
+  File "/usr/lib/python3/dist-packages/samba/join.py", line 526, in DsAddEntry
+    raise RuntimeError("DsAddEntry failed")
+Adding CN=SAMBA-DC1,OU=Domain Controllers,DC=lab,DC=test
+Adding CN=SAMBA-DC1,CN=Servers,CN=Default-First-Site-Name,CN=Sites,CN=Configuration,DC=lab,DC=test
+Adding CN=NTDS Settings,CN=SAMBA-DC1,CN=Servers,CN=Default-First-Site-Name,CN=Sites,CN=Configuration,DC=lab,DC=test
+DsAddEntry failed with status WERR_ACCESS_DENIED info (8567, 'WERR_DS_INCOMPATIBLE_VERSION')
+Join failed - cleaning up
+Deleted CN=SAMBA-DC1,OU=Domain Controllers,DC=lab,DC=test
+Deleted CN=SAMBA-DC1,CN=Servers,CN=Default-First-Site-Name,CN=Sites,CN=Configuration,DC=lab,DC=test
+--- JOIN RETURN CODE: 255 ---
+=== T2 join retry with functional level=2016 ===
+WARNING: Using passwords on command line is insecure. Installing the setproctitle python module will hide these from shortly after program start.
+INFO 2026-04-16 22:25:38,545 pid:1504 /usr/lib/python3/dist-packages/samba/join.py #104: Finding a writeable DC for domain 'lab.test'
+INFO 2026-04-16 22:25:38,551 pid:1504 /usr/lib/python3/dist-packages/samba/join.py #106: Found DC WS2025-DC1.lab.test
+INFO 2026-04-16 22:25:38,646 pid:1504 /usr/lib/python3/dist-packages/samba/join.py #1605: workgroup is LAB
+INFO 2026-04-16 22:25:38,646 pid:1504 /usr/lib/python3/dist-packages/samba/join.py #1608: realm is lab.test
+INFO 2026-04-16 22:25:39,088 pid:1504 /usr/lib/python3/dist-packages/samba/provision/__init__.py #2112: Looking up IPv4 addresses
+INFO 2026-04-16 22:25:39,089 pid:1504 /usr/lib/python3/dist-packages/samba/provision/__init__.py #2129: Looking up IPv6 addresses
+WARNING 2026-04-16 22:25:39,089 pid:1504 /usr/lib/python3/dist-packages/samba/provision/__init__.py #2136: No IPv6 address will be assigned
+INFO 2026-04-16 22:25:39,362 pid:1504 /usr/lib/python3/dist-packages/samba/provision/__init__.py #2302: Setting up share.ldb
+INFO 2026-04-16 22:25:39,422 pid:1504 /usr/lib/python3/dist-packages/samba/provision/__init__.py #2306: Setting up secrets.ldb
+INFO 2026-04-16 22:25:39,478 pid:1504 /usr/lib/python3/dist-packages/samba/provision/__init__.py #2311: Setting up the registry
+INFO 2026-04-16 22:25:39,605 pid:1504 /usr/lib/python3/dist-packages/samba/provision/__init__.py #2314: Setting up the privileges database
+INFO 2026-04-16 22:25:39,694 pid:1504 /usr/lib/python3/dist-packages/samba/provision/__init__.py #2317: Setting up idmap db
+INFO 2026-04-16 22:25:39,742 pid:1504 /usr/lib/python3/dist-packages/samba/provision/__init__.py #2324: Setting up SAM db
+INFO 2026-04-16 22:25:39,750 pid:1504 /usr/lib/python3/dist-packages/samba/provision/__init__.py #887: Setting up sam.ldb partitions and settings
+INFO 2026-04-16 22:25:39,766 pid:1504 /usr/lib/python3/dist-packages/samba/provision/__init__.py #899: Setting up sam.ldb rootDSE
+INFO 2026-04-16 22:25:39,774 pid:1504 /usr/lib/python3/dist-packages/samba/provision/__init__.py #1312: Pre-loading the Samba 4 and AD schema
+Unable to determine the DomainSID, can not enforce uniqueness constraint on local domainSIDs
+
+INFO 2026-04-16 22:25:39,861 pid:1504 /usr/lib/python3/dist-packages/samba/provision/__init__.py #2425: A Kerberos configuration suitable for Samba AD has been generated at /var/lib/samba/private/krb5.conf
+INFO 2026-04-16 22:25:39,862 pid:1504 /usr/lib/python3/dist-packages/samba/provision/__init__.py #2427: Merge the contents of this file with your system krb5.conf or replace it with this one. Do not create a symlink!
+INFO 2026-04-16 22:25:39,876 pid:1504 /usr/lib/python3/dist-packages/samba/join.py #964: Starting replication
+Schema-DN[CN=Schema,CN=Configuration,DC=lab,DC=test] objects[402/1852] linked_values[0/0]
+Schema-DN[CN=Schema,CN=Configuration,DC=lab,DC=test] objects[804/1852] linked_values[0/0]
+Schema-DN[CN=Schema,CN=Configuration,DC=lab,DC=test] objects[1206/1852] linked_values[0/0]
+Schema-DN[CN=Schema,CN=Configuration,DC=lab,DC=test] objects[1608/1852] linked_values[0/0]
+Schema-DN[CN=Schema,CN=Configuration,DC=lab,DC=test] objects[1783/1852] linked_values[0/0]
+Analyze and apply schema objects
+Partition[CN=Configuration,DC=lab,DC=test] objects[402/3459] linked_values[0/24]
+Partition[CN=Configuration,DC=lab,DC=test] objects[804/3459] linked_values[0/24]
+Partition[CN=Configuration,DC=lab,DC=test] objects[1206/3459] linked_values[0/24]
+Partition[CN=Configuration,DC=lab,DC=test] objects[1608/3459] linked_values[1/24]
+Partition[CN=Configuration,DC=lab,DC=test] objects[1628/3459] linked_values[24/24]
+dsdb_replicated_objects_convert: Ignoring object outside partition 329a7987-6648-457e-b19d-251bf40e639a CN=Schema,CN=Configuration,DC=lab,DC=test: WERR_DS_ADD_REPLICA_INHIBITED
+Partition[DC=lab,DC=test] objects[111/110] linked_values[23/26]
+Partition[DC=lab,DC=test] objects[322/3829] linked_values[26/26]
+dsdb_replicated_objects_convert: Ignoring object outside partition 618bf56b-384a-402a-a108-2a5a30ba3ad9 CN=Configuration,DC=lab,DC=test: WERR_DS_ADD_REPLICA_INHIBITED
+dsdb_replicated_objects_convert: Ignoring object outside partition 4c651ec4-5fb4-446a-a2f4-790d2760509c DC=DomainDnsZones,DC=lab,DC=test: WERR_DS_ADD_REPLICA_INHIBITED
+dsdb_replicated_objects_convert: Ignoring object outside partition 001ff57c-fef5-4d32-affe-9194f10775a0 DC=ForestDnsZones,DC=lab,DC=test: WERR_DS_ADD_REPLICA_INHIBITED
+Partition[DC=DomainDnsZones,DC=lab,DC=test] objects[43/43] linked_values[0/0]
+Partition[DC=ForestDnsZones,DC=lab,DC=test] objects[18/18] linked_values[0/0]
+Exop on[CN=RID Manager$,CN=System,DC=lab,DC=test] objects[3] linked_values[0]
+INFO 2026-04-16 22:25:42,767 pid:1504 /usr/lib/python3/dist-packages/samba/join.py #1084: Committing SAM database - this may take some time
+Repacking database from v1 to v2 format (first record CN=Object-Count,CN=Schema,CN=Configuration,DC=lab,DC=test)
+Repack: re-packed 10000 records so far
+Repacking database from v1 to v2 format (first record CN=Terminal-Server-License-Server,CN=Extended-Rights,CN=Configuration,DC=lab,DC=test)
+Repacking database from v1 to v2 format (first record DC=@,DC=lab.test,CN=MicrosoftDNS,DC=DomainDnsZones,DC=lab,DC=test)
+Repacking database from v1 to v2 format (first record DC=_kerberos._tcp.Default-First-Site-Name._sites.dc,DC=_msdcs.lab.test,CN=MicrosoftDNS,DC=ForestDnsZones,DC=lab,DC=test)
+Repacking database from v1 to v2 format (first record CN={2AC9B9BD-9EAA-43A7-9175-C67699CAD535},CN=Policies,CN=System,DC=lab,DC=test)
+INFO 2026-04-16 22:25:44,987 pid:1504 /usr/lib/python3/dist-packages/samba/join.py #1104: Committed SAM database
+INFO 2026-04-16 22:25:44,989 pid:1504 /usr/lib/python3/dist-packages/samba/join.py #1180: Adding 1 remote DNS records for SAMBA-DC1.lab.test
+INFO 2026-04-16 22:25:45,021 pid:1504 /usr/lib/python3/dist-packages/samba/join.py #1242: Adding DNS A record SAMBA-DC1.lab.test for IPv4 IP: 172.22.0.20
+INFO 2026-04-16 22:25:45,036 pid:1504 /usr/lib/python3/dist-packages/samba/join.py #1270: Adding DNS CNAME record 0f681b9d-0958-439b-8de5-4782d98718cb._msdcs.lab.test for SAMBA-DC1.lab.test
+INFO 2026-04-16 22:25:45,049 pid:1504 /usr/lib/python3/dist-packages/samba/join.py #1295: All other DNS records (like _ldap SRV records) will be created samba_dnsupdate on first startup
+INFO 2026-04-16 22:25:45,049 pid:1504 /usr/lib/python3/dist-packages/samba/join.py #1301: Replicating new DNS records in DC=DomainDnsZones,DC=lab,DC=test
+Partition[DC=DomainDnsZones,DC=lab,DC=test] objects[1/43] linked_values[0/0]
+INFO 2026-04-16 22:25:45,075 pid:1504 /usr/lib/python3/dist-packages/samba/join.py #1301: Replicating new DNS records in DC=ForestDnsZones,DC=lab,DC=test
+Partition[DC=ForestDnsZones,DC=lab,DC=test] objects[1/18] linked_values[0/0]
+INFO 2026-04-16 22:25:45,097 pid:1504 /usr/lib/python3/dist-packages/samba/join.py #1316: Sending DsReplicaUpdateRefs for all the replicated partitions
+INFO 2026-04-16 22:25:45,941 pid:1504 /usr/lib/python3/dist-packages/samba/join.py #1346: Setting isSynchronized and dsServiceName
+INFO 2026-04-16 22:25:45,952 pid:1504 /usr/lib/python3/dist-packages/samba/join.py #1361: Setting up secrets database
+INFO 2026-04-16 22:25:46,089 pid:1504 /usr/lib/python3/dist-packages/samba/join.py #1622: Joined domain LAB (SID S-1-5-21-208823675-502950001-1210992785) as a DC
+Adding CN=SAMBA-DC1,OU=Domain Controllers,DC=lab,DC=test
+Adding CN=SAMBA-DC1,CN=Servers,CN=Default-First-Site-Name,CN=Sites,CN=Configuration,DC=lab,DC=test
+Adding CN=NTDS Settings,CN=SAMBA-DC1,CN=Servers,CN=Default-First-Site-Name,CN=Sites,CN=Configuration,DC=lab,DC=test
+Adding SPNs to CN=SAMBA-DC1,OU=Domain Controllers,DC=lab,DC=test
+Setting account password for SAMBA-DC1$
+Enabling account
+Calling bare provision
+Provision OK for domain DN DC=lab,DC=test
+Replicating critical objects from the base DN of the domain
+Done with always replicated NC (base, config, schema)
+Replicating DC=DomainDnsZones,DC=lab,DC=test
+Replicating DC=ForestDnsZones,DC=lab,DC=test
+--- JOIN RC: 0 ---
+=== post-join service start ===
+[libdefaults]
+	default_realm = LAB.TEST
+	dns_lookup_realm = false
+	dns_lookup_kdc = true
+
+[realms]
+LAB.TEST = {
+	default_domain = lab.test
+}
+
+[domain_realm]
+	SAMBA-DC1 = LAB.TEST
+Synchronizing state of samba-ad-dc.service with SysV service script with /usr/lib/systemd/systemd-sysv-install.
+Executing: /usr/lib/systemd/systemd-sysv-install enable samba-ad-dc
+Failed to enable unit: File '/etc/systemd/system/samba.service' already exists and is a symlink to /dev/null
+Warning: The unit file, source configuration file or drop-ins of samba-ad-dc.service changed on disk. Run 'systemctl daemon-reload' to reload units.
+active
+--- service status tail ---
+● samba-ad-dc.service - Samba AD Daemon
+     Loaded: loaded (/usr/lib/systemd/system/samba-ad-dc.service; enabled; preset: enabled)
+     Active: active (running) since Thu 2026-04-16 22:26:42 PDT; 8s ago
+ Invocation: 492cb4235a6d4b4aa418922c44d12ec6
+       Docs: man:samba(8)
+             man:samba(7)
+             man:smb.conf(5)
+    Process: 1673 ExecCondition=/usr/share/samba/is-configured samba (code=exited, status=0/SUCCESS)
+   Main PID: 1676 (samba)
+     Status: "samba: ready to serve connections..."
+      Tasks: 58 (limit: 2206)
+     Memory: 192.6M (peak: 270.7M)
+        CPU: 7.579s
+     CGroup: /system.slice/samba-ad-dc.service
+             ├─1676 "samba: root process"
+             ├─1677 "samba: tfork waiter process(1678)"
+             ├─1678 "samba: task[s3fs] pre-fork master"
+             ├─1679 "samba: tfork waiter process(1680)"
+             ├─1680 "samba: task[rpc] pre-fork master"
+             ├─1681 "samba: tfork waiter process(1682)"
+             ├─1682 /usr/sbin/smbd -D "--option=server role check:inhibit=yes" --foreground
+             ├─1683 "samba: tfork waiter process(1684)"
+             ├─1684 "samba: task[nbt] pre-fork master"
+             ├─1685 "samba: tfork waiter process(1686)"
+             ├─1686 "samba: task[wrepl] pre-fork master"
+--- listening ports ---
+LISTEN 0      10           0.0.0.0:3268       0.0.0.0:*    users:(("ldap(3",pid=1784,fd=37),("ldap(2",pid=1782,fd=37),("ldap(1",pid=1780,fd=37),("ldap(0",pid=1778,fd=37),("ldap[master]",pid=1688,fd=37))
+LISTEN 0      10           0.0.0.0:389        0.0.0.0:*    users:(("ldap(3",pid=1784,fd=35),("ldap(2",pid=1782,fd=35),("ldap(1",pid=1780,fd=35),("ldap(0",pid=1778,fd=35),("ldap[master]",pid=1688,fd=35))
+LISTEN 0      10           0.0.0.0:464        0.0.0.0:*    users:(("kdc(3",pid=1722,fd=40),("kdc(2",pid=1716,fd=40),("kdc(1",pid=1708,fd=40),("kdc(0",pid=1703,fd=40),("kdc[master]",pid=1695,fd=40))     
+LISTEN 0      10           0.0.0.0:53         0.0.0.0:*    users:(("dns[master]",pid=1721,fd=48))                                                                                                         
+LISTEN 0      10           0.0.0.0:636        0.0.0.0:*    users:(("ldap(3",pid=1784,fd=36),("ldap(2",pid=1782,fd=36),("ldap(1",pid=1780,fd=36),("ldap(0",pid=1778,fd=36),("ldap[master]",pid=1688,fd=36))
+LISTEN 0      10           0.0.0.0:88         0.0.0.0:*    users:(("kdc(3",pid=1722,fd=38),("kdc(2",pid=1716,fd=38),("kdc(1",pid=1708,fd=38),("kdc(0",pid=1703,fd=38),("kdc[master]",pid=1695,fd=38))     
+LISTEN 0      10              [::]:3268          [::]:*    users:(("ldap(3",pid=1784,fd=33),("ldap(2",pid=1782,fd=33),("ldap(1",pid=1780,fd=33),("ldap(0",pid=1778,fd=33),("ldap[master]",pid=1688,fd=33))
+LISTEN 0      10              [::]:389           [::]:*    users:(("ldap(3",pid=1784,fd=31),("ldap(2",pid=1782,fd=31),("ldap(1",pid=1780,fd=31),("ldap(0",pid=1778,fd=31),("ldap[master]",pid=1688,fd=31))
+LISTEN 0      10              [::]:464           [::]:*    users:(("kdc(3",pid=1722,fd=36),("kdc(2",pid=1716,fd=36),("kdc(1",pid=1708,fd=36),("kdc(0",pid=1703,fd=36),("kdc[master]",pid=1695,fd=36))     
+LISTEN 0      10              [::]:53            [::]:*    users:(("dns[master]",pid=1721,fd=45))                                                                                                         
+LISTEN 0      10              [::]:636           [::]:*    users:(("ldap(3",pid=1784,fd=32),("ldap(2",pid=1782,fd=32),("ldap(1",pid=1780,fd=32),("ldap(0",pid=1778,fd=32),("ldap[master]",pid=1688,fd=32))
+LISTEN 0      10              [::]:88            [::]:*    users:(("kdc(3",pid=1722,fd=33),("kdc(2",pid=1716,fd=33),("kdc(1",pid=1708,fd=33),("kdc(0",pid=1703,fd=33),("kdc[master]",pid=1695,fd=33))     
+LISTEN 0      50           0.0.0.0:445        0.0.0.0:*    users:(("smbd",pid=1682,fd=37))                                                                                                                
+LISTEN 0      50              [::]:445           [::]:*    users:(("smbd",pid=1682,fd=35))                                                                                                                
+--- net ads info (via self) ---
+LDAP server: 172.22.0.10
+LDAP server name: WS2025-DC1.lab.test
+Workgroup: LAB
+Realm: LAB.TEST
+Bind Path: dc=LAB,dc=TEST
+LDAP port: 389
+Server time: Thu, 16 Apr 2026 22:26:51 PDT
+KDC server: 172.22.0.10
+Server time offset: 0
+Last machine account password change: Thu, 16 Apr 2026 22:25:45 PDT
+--- kinit Administrator ---
+Password for Administrator@LAB.TEST: 
+Ticket cache: FILE:/tmp/krb5cc_0
+Default principal: Administrator@LAB.TEST
+
+Valid starting       Expires              Service principal
+04/16/2026 22:26:51  04/17/2026 08:26:51  krbtgt/LAB.TEST@LAB.TEST
+	renew until 04/17/2026 22:26:51
