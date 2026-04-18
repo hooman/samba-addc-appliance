@@ -252,3 +252,141 @@ the previous regression, plus:
   now uses exact DisplayName match (`Get-GPO -Name '…Member Server'`) so
   the real Member Server policy lands on `OU=Lab/TestServers` instead of
   its Credential Guard sibling.
+
+---
+
+## T4 re-run after linking all 8 baseline GPOs (2026-04-17)
+
+A follow-up audit asked: *"DC vs Member Server is a real distinction — are
+all the baseline GPOs actually linked?"* Answer: no. The previous pass
+linked only 2 of 8. `Apply-SecurityBaseline.ps1` was rewritten to use a
+`$BaselineLinks` hashtable mapping each DisplayName to its intended OU.
+Final state after the fix (confirmed via `Get-GPInheritance`):
+
+```
+DC=lab,DC=test:
+  Default Domain Policy
+  MSFT Internet Explorer 11 - Computer
+  MSFT Internet Explorer 11 - User
+  MSFT Windows Server 2025 v2602 - Defender Antivirus
+  MSFT Windows Server 2025 v2602 - Domain Security
+
+OU=Domain Controllers,DC=lab,DC=test:
+  Default Domain Controllers Policy
+  MSFT Windows Server 2025 v2602 - Domain Controller
+  MSFT Windows Server 2025 v2602 - Domain Controller Virtualization Based Security
+
+OU=TestServers,OU=Lab,DC=lab,DC=test:
+  MSFT Windows Server 2025 v2602 - Member Server
+  MSFT Windows Server 2025 v2602 - Member Server Credential Guard
+```
+
+### T4 outcomes with full baseline applied
+
+`gpresult /R` on WS2025-DC1 confirms all 5 computer-scoped baseline GPOs
+are in the "Applied Group Policy Objects" list. Re-running the T4 tests:
+
+| # | Test | Outcome | Notes |
+|---|------|---------|-------|
+| 4.1 | LDAP signing (Samba↔WS2025) | **PASS** | Kerberos-signed bind, AES256 TGT |
+| 4.2 | RC4 TGT should be refused | **STILL ISSUABLE** | See "RC4 finding" below |
+| 4.3 | SMB signing (Samba↔WS2025) | **PASS** | `--option='client signing = mandatory'` works |
+| 4.4 | LDAPS (port 636 on Samba) | **PASS** | Self-signed cert with DNS+IP SANs |
+
+### "RC4 finding" — not what the baseline promises
+
+Despite all 8 GPOs linked, `kinit Administrator@LAB.TEST` with a
+`default_tkt_enctypes = arcfour-hmac-md5`-only config **still gets a TGT**
+with `Etype (skey, tkt): DEPRECATED:arcfour-hmac`. Investigation:
+
+**msDS-SupportedEncryptionTypes per account:**
+
+| Account | Value | Meaning |
+|---------|-------|---------|
+| Administrator | `<unset>` | KDC falls back to permissive default (all enctypes) |
+| Guest         | `<unset>` | same |
+| krbtgt        | `0`       | same ("let the KDC decide") |
+| testuser-v2   | `<unset>` | same |
+| WS2025-DC1$   | `28` (=0x1C = AES128+AES256+CompoundIdentity) | AES only |
+| SAMBA-DC1$    | `28` | AES only |
+
+The WS2025 baseline configures the "Network security: Configure encryption
+types allowed for Kerberos" policy (registry settings), but:
+
+1. These registry keys affect what the **client** (the local machine)
+   *requests*, not what the **KDC** *will issue*.
+2. The KDC decides what to issue based on the principal's
+   `msDS-SupportedEncryptionTypes` attribute. Absent that attribute, the
+   KDC applies a permissive default that includes RC4 for backward compat.
+3. The baseline import sets the attribute on **computer accounts** created
+   after the baseline is applied, but does not retroactively update
+   **user accounts** (including built-in `Administrator`, `Guest`, `krbtgt`).
+
+**Taxonomy: B — baseline design, not a Samba gap.** Samba requests AES by
+default and gets AES; no interop problem. A Windows admin following
+best-practice hardening needs an **additional step** that the baseline
+import doesn't automate:
+
+```powershell
+Get-ADUser -Filter * -Properties msDS-SupportedEncryptionTypes |
+    Where-Object { -not $_.'msDS-SupportedEncryptionTypes' } |
+    ForEach-Object { Set-ADUser $_ -Replace @{'msDS-SupportedEncryptionTypes' = 24} }
+```
+
+### "Password policy not taking effect" finding
+
+`Get-ADDefaultDomainPasswordPolicy` post-baseline:
+
+```
+MinPasswordLength    : 0
+PasswordHistoryCount : 0
+LockoutThreshold     : 0
+ComplexityEnabled    : True
+```
+
+But the Domain Security GPO has all these settings authored:
+
+```
+MinimumPasswordLength = 14
+PasswordHistorySize   = 24
+LockoutBadCount       = 3
+LockoutDuration       = 15
+AllowAdministratorLockout = true
+```
+
+Why isn't it applied? **Active Directory has a quirk**: Account / Password /
+Kerberos policies are ONLY read from the **Default Domain Policy** GPO
+(DN-fixed, can be found with `Get-GPO -Guid "31B2F340-016D-11D2-945F-00C04FB984F9"`),
+not from *any* other GPO even if linked at the domain root. Any other
+GPO may author these settings in its template, but AD's security policy
+engine ignores them for the purpose of domain account policy — they only
+apply to local accounts on member machines that receive the GPO.
+
+MS's baseline ships these settings in "Domain Security" (easier to audit
+and migrate than editing Default Domain Policy). The admin is expected
+to either:
+
+1. Edit Default Domain Policy to mirror the settings, or
+2. Create a Fine-Grained Password Policy (PSO) in AD and bind to a group.
+
+Neither is automated by the baseline ZIP's `Baseline-ADImport.ps1` nor by
+our `Apply-SecurityBaseline.ps1`.
+
+**Taxonomy: B — Windows/baseline platform quirk.** Documented here; no
+change to the appliance scripts. If the lab ever wants to test
+"password-policy-enforced" scenarios, the admin needs to merge settings
+manually — this is a known Windows gotcha, widely written up.
+
+### Samba-interop impact
+
+**None.** All the compliance-relevant settings that Samba interacts with
+(LDAP signing, SMB signing, channel binding, Kerberos AES preference) are
+in the "Domain Controller" GPO which is correctly linked and applied.
+Samba's hardening already matches: `ldap server require strong auth = yes`,
+`server/client signing = mandatory`, `kerberos encryption types = strong`,
+`ntlm auth = mschapv2-and-ntlmv2-only`. T4.1, T4.3, T4.4 all pass.
+
+The RC4 and password-policy findings are **Windows-side production
+hardening concerns**, not Samba-interop blockers.
+
+Full output in `test-results/T4-baseline-v2.log`.

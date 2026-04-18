@@ -1,0 +1,165 @@
+=== T4.1 LDAP signing to WS2025 ===
+--- Kerberos-signed bind (TGT + ldbsearch) ---
+kdestroy: No credentials cache found while destroying cache
+Password for Administrator@LAB.TEST: 
+Default principal: Administrator@LAB.TEST
+	renew until 04/18/2026 17:19:54, Etype (skey, tkt): aes256-cts-hmac-sha1-96, aes256-cts-hmac-sha1-96 
+WARNING: The option -k|--kerberos is deprecated!
+# record 1
+dn: 
+defaultNamingContext: DC=lab,DC=test
+
+
+=== T4.2 Kerberos RC4 — should NOW be blocked by full baseline ===
+Password for Administrator@LAB.TEST: 
+Warning: encryption type arcfour-hmac used for authentication is deprecated and will be disabled
+--- ticket etype (if granted): ---
+Default principal: Administrator@LAB.TEST
+	renew until 04/18/2026 17:19:54, Etype (skey, tkt): DEPRECATED:arcfour-hmac, DEPRECATED:arcfour-hmac 
+
+=== T4.2b check msDS-SupportedEncryptionTypes on Administrator ===
+Password for Administrator@LAB.TEST: 
+dn: CN=Administrator,CN=Users,DC=lab,DC=test
+
+=== T4.3 SMB signing mandatory ===
+Can't load /etc/samba/smb.conf - run testparm to debug it
+  .                                   D        0  Fri Apr 17 12:09:44 2026
+  ..                                  D        0  Fri Apr 17 12:09:44 2026
+  lab.test                           Dr        0  Fri Apr 17 12:09:44 2026
+
+
+=== T4.4 LDAPS on Samba (SAN cert) ===
+subject=CN=samba-dc1.lab.test, O=LAB.TEST
+X509v3 Subject Alternative Name: 
+    DNS:samba-dc1.lab.test, DNS:samba-dc1, IP Address:10.10.10.20
+
+=== ADDITIONAL (lab v2): Domain Security policies now enforced? ===
+--- AccountLockoutThreshold (domain password policy) ---
+Password information for domain 'DC=lab,DC=test'
+
+Password complexity: on
+Store plaintext passwords: off
+Password history length: 0
+Minimum password length: 0
+Minimum password age (days): 0
+Maximum password age (days): 42
+Account lockout duration (mins): 10
+Account lockout threshold (attempts): 0
+=== Force GPO refresh + wait ===
+
+
+
+
+=== Default Domain Password Policy (baseline should set mins) ===
+
+[32;1mMinPasswordLength    : [0m0
+[32;1mPasswordHistoryCount : [0m0
+[32;1mMaxPasswordAge       : [0m42.00:00:00
+[32;1mLockoutThreshold     : [0m0
+[32;1mLockoutDuration      : [0m00:10:00
+[32;1mComplexityEnabled    : [0mTrue
+
+
+=== Kerberos policy (user ticket lifetime etc) ===
+
+[32;1mmaxPwdAge : [0m-36288000000000
+
+
+=== gpresult /R on DC ===
+
+    Applied Group Policy Objects
+        MSFT Windows Server 2025 v2602 - Domain Controller
+        MSFT Windows Server 2025 v2602 - Domain Controller Virtualization Based Security
+        MSFT Internet Explorer 11 - Computer
+        MSFT Windows Server 2025 v2602 - Defender Antivirus
+        MSFT Windows Server 2025 v2602 - Domain Security
+
+=== msDS-SupportedEncryptionTypes per-account snapshot ===
+
+
+[32;1mSamAccountName[0m[32;1m EncTypes[0m
+[32;1m--------------[0m [32;1m--------[0m
+Administrator  
+Guest          
+krbtgt         0
+testuser-v2    
+
+
+[32;1mName      [0m[32;1m EncTypes[0m
+[32;1m----      [0m [32;1m--------[0m
+WS2025-DC1       28
+SAMBA-DC1        28
+
+=== Registry-level Kerberos enctype policy (NTDS SupportedEncryptionTypes) ===
+=== KDC-side enctype registry (what the KDC WILL ISSUE) ===
+-- HKLM:\System\CurrentControlSet\Services\Kdc --
+-- HKLM:\System\CurrentControlSet\Services\Kdc\Parameters --
+-- HKLM:\Software\Policies\Microsoft\Windows\Kerberos\Parameters --
+    (key absent)
+-- HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\System\Kerberos\Parameters --
+-- HKLM:\System\CurrentControlSet\Control\Lsa\Kerberos --
+-- HKLM:\System\CurrentControlSet\Control\Lsa\Kerberos\Parameters --
+
+=== Baseline policies setting Kerberos enctypes (via gpresult /z) ===
+
+                Folder Id: Software\Microsoft\Windows\CurrentVersion\Policies\System\Kerberos\Parameters\PKInitSHA512
+                Folder Id: Software\Microsoft\Windows\CurrentVersion\Policies\System\Kerberos\Parameters\PKInitSHA1
+                Folder Id: Software\Microsoft\Windows\CurrentVersion\Policies\System\Kerberos\Parameters\PKInitSHA384
+                Folder Id: Software\Policies\Microsoft\Windows NT\Printers\RPC\ForceKerberosForRpc
+                Folder Id: 
+Software\Microsoft\Windows\CurrentVersion\Policies\System\Kerberos\Parameters\PKInitHashAlgorithmConfigurationEnabled
+                Folder Id: Software\Microsoft\Windows\CurrentVersion\Policies\System\Kerberos\Parameters\PKInitSHA256
+
+[31;1mParserError: [31;1mAt line:13 char:44 +             $val = $o.Display.DisplayUnits ?? $o.Display.DisplayBoole ... +                       [0m
+[31;1m[31;1m~~ Unexpected token '??' in expression or statement.[0m
+=== Domain Security GPO settings containing 'Kerberos', 'Encryption', or 'Password' ===
+
+=== Security options with a relevant name ===
+
+=== Any account policy in this GPO? ===
+
+[32;1mName                     [0m[32;1m SettingNumber[0m[32;1m SettingBoolean[0m
+[32;1m----                     [0m [32;1m-------------[0m [32;1m--------------[0m
+AllowAdministratorLockout               true
+ClearTextPassword                       false
+LockoutBadCount           3             
+LockoutDuration           15            
+MinimumPasswordLength     14            
+PasswordComplexity                      true
+PasswordHistorySize       24            
+ResetLockoutCount         15            
+
+=== Where IS the password policy set? Check all GPOs ===
+GPO: Default Domain Policy
+  ClearTextPassword = false
+  LockoutBadCount = 0
+  MaximumPasswordAge = 42
+  MinimumPasswordAge = 0
+  MinimumPasswordLength = 0
+  PasswordComplexity = true
+  PasswordHistorySize = 0
+  MaxClockSkew = 5
+  MaxRenewAge = 7
+  MaxServiceAge = 600
+  MaxTicketAge = 10
+  TicketValidateClient = true
+GPO: MSFT Windows Server 2025 v2602 - Domain Security
+  AllowAdministratorLockout = true
+  ClearTextPassword = false
+  LockoutBadCount = 3
+  LockoutDuration = 15
+  MinimumPasswordLength = 14
+  PasswordComplexity = true
+  PasswordHistorySize = 24
+  ResetLockoutCount = 15
+GPO: MSFT Windows Server 2025 v2602 - Domain Controller
+   = 
+   = 
+   = 
+   = 
+   = 
+GPO: MSFT Windows Server 2025 v2602 - Member Server
+   = 
+   = 
+   = 
+   = 
