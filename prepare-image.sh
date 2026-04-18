@@ -361,29 +361,133 @@ NFTEOF
 log "Installing sysvol-sync helper..."
 cat > /usr/local/sbin/sysvol-sync << 'SYNCEOF'
 #!/usr/bin/env bash
-set -euo pipefail
+#
+# sysvol-sync — periodic SYSVOL replication for Samba AD DC deployments.
+#
+# Samba has no native DFSR, so ongoing /var/lib/samba/sysvol replication
+# is this script's responsibility. Two transports are supported:
+#
+#   ssh: rsync-over-SSH. Samba ↔ Samba only (Windows DCs typically have no
+#        sshd). Primary runs SYNC_ROLE=push, replicas run SYNC_ROLE=pull.
+#   smb: smbclient pull from //REMOTE_DC/sysvol. Pull-only; works against
+#        Windows or Samba. Not usable for pushing INTO a Windows DC —
+#        DFSR owns the source of truth on the Windows side.
+#
+# Configuration lives in /etc/samba/sysvol-sync.conf (written by
+# samba-sconfig). This script never writes that file.
+
+set -u -o pipefail
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
 CONF="/etc/samba/sysvol-sync.conf"
-[[ -f "$CONF" ]] || { echo "ERROR: $CONF not found. Run samba-sconfig." >&2; exit 1; }
-source "$CONF"
-LOCKFILE="/var/run/sysvol-sync.lock"
+LOCKFILE="/run/sysvol-sync.lock"
 LOGFILE="/var/log/samba/sysvol-sync.log"
+
+[[ -f "$CONF" ]] || { echo "ERROR: $CONF not found. Run samba-sconfig." >&2; exit 1; }
+# shellcheck disable=SC1090
+. "$CONF"
+
+mkdir -p "$(dirname "$LOGFILE")"
+log()   { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOGFILE"; }
+fatal() { log "ERROR: $*"; exit 1; }
+
 exec 200>"$LOCKFILE"
-flock -n 200 || { echo "$(date): Sync already running." >> "$LOGFILE"; exit 0; }
-log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOGFILE"; }
-log "Starting SYSVOL sync (role=${SYNC_ROLE:-pull})..."
-case "${SYNC_ROLE:-pull}" in
-    pull)
-        rsync -avz --delete -e "ssh -i ${SSH_KEY} -o StrictHostKeyChecking=no" \
-            "${REMOTE_USER}@${REMOTE_DC}:/var/lib/samba/sysvol/" \
-            "/var/lib/samba/sysvol/" --exclude='*.tmp' >> "$LOGFILE" 2>&1 ;;
-    push)
-        rsync -avz --delete -e "ssh -i ${SSH_KEY} -o StrictHostKeyChecking=no" \
-            "/var/lib/samba/sysvol/" \
-            "${REMOTE_USER}@${REMOTE_DC}:/var/lib/samba/sysvol/" \
-            --exclude='*.tmp' >> "$LOGFILE" 2>&1 ;;
+if ! flock -n 200; then
+    log "skip: another sysvol-sync is already running"
+    exit 0
+fi
+
+: "${SYNC_TRANSPORT:=ssh}"
+: "${REMOTE_DC:?REMOTE_DC not set in $CONF}"
+
+log "start: transport=${SYNC_TRANSPORT} remote=${REMOTE_DC}"
+
+case "$SYNC_TRANSPORT" in
+    ssh)
+        : "${SYNC_ROLE:=pull}"
+        : "${REMOTE_USER:?REMOTE_USER not set in $CONF}"
+        : "${SSH_KEY:?SSH_KEY not set in $CONF}"
+        [[ -f "$SSH_KEY" ]] || fatal "SSH key $SSH_KEY does not exist; re-run samba-sconfig"
+
+        ssh_cmd="ssh -i $SSH_KEY -o StrictHostKeyChecking=no -o BatchMode=yes"
+        case "$SYNC_ROLE" in
+            pull)
+                if rsync -avz --delete --max-delete=100 \
+                        -e "$ssh_cmd" \
+                        "${REMOTE_USER}@${REMOTE_DC}:/var/lib/samba/sysvol/" \
+                        "/var/lib/samba/sysvol/" \
+                        --exclude='*.tmp' >> "$LOGFILE" 2>&1; then
+                    log "rsync pull OK"
+                else
+                    log "WARN: rsync pull returned $? (partial or transient failure)"
+                fi
+                ;;
+            push)
+                if rsync -avz --delete --max-delete=100 \
+                        -e "$ssh_cmd" \
+                        "/var/lib/samba/sysvol/" \
+                        "${REMOTE_USER}@${REMOTE_DC}:/var/lib/samba/sysvol/" \
+                        --exclude='*.tmp' >> "$LOGFILE" 2>&1; then
+                    log "rsync push OK"
+                else
+                    log "WARN: rsync push returned $? (partial or transient failure)"
+                fi
+                ;;
+            *) fatal "unknown SYNC_ROLE '$SYNC_ROLE' (expected: pull|push)" ;;
+        esac
+        ;;
+
+    smb)
+        : "${SMB_CRED_FILE:?SMB_CRED_FILE not set in $CONF}"
+        [[ -f "$SMB_CRED_FILE" ]] || fatal "credentials file $SMB_CRED_FILE is missing"
+
+        realm_lower=$(awk -F= '
+            /^[[:space:]]*realm[[:space:]]*=/ {
+                sub(/^[[:space:]]+/, "", $2); sub(/[[:space:]]+$/, "", $2)
+                print tolower($2); exit
+            }' /etc/samba/smb.conf)
+        [[ -n "$realm_lower" ]] || fatal "could not determine realm from /etc/samba/smb.conf"
+
+        tmpdir=$(mktemp -d)
+        trap 'rm -rf "$tmpdir"' EXIT
+
+        # mget preserves file content; NTACLs are NOT carried over SMB in a
+        # form Samba's on-disk xattrs can consume. sysvolreset below rebuilds
+        # them from AD, so that's the source of truth.
+        if smbclient "//${REMOTE_DC}/sysvol" -A "$SMB_CRED_FILE" \
+                -c "recurse ON; prompt OFF; lcd ${tmpdir}; mget ${realm_lower}" \
+                >> "$LOGFILE" 2>&1; then
+
+            if [[ -d "${tmpdir}/${realm_lower}" ]]; then
+                mkdir -p "/var/lib/samba/sysvol/${realm_lower}"
+                if rsync -a --delete --max-delete=100 \
+                        "${tmpdir}/${realm_lower}/" \
+                        "/var/lib/samba/sysvol/${realm_lower}/" \
+                        >> "$LOGFILE" 2>&1; then
+                    log "smb pull OK from //${REMOTE_DC}/sysvol/${realm_lower}"
+                else
+                    log "WARN: local rsync returned $? after smb pull"
+                fi
+            else
+                fatal "smbclient mget produced no ${realm_lower}/ under ${tmpdir}"
+            fi
+        else
+            fatal "smbclient pull from //${REMOTE_DC}/sysvol failed"
+        fi
+        ;;
+
+    *) fatal "unknown SYNC_TRANSPORT '$SYNC_TRANSPORT' (expected: ssh|smb)" ;;
 esac
-samba-tool ntacl sysvolreset 2>> "$LOGFILE" || true
-log "SYSVOL sync completed."
+
+# Always re-derive NTACLs from AD so foreign SIDs / renamed principals in
+# copied GPOs resolve correctly. This is the same call samba-sconfig's
+# "Reset SYSVOL ACLs" menu item makes.
+if ! samba-tool ntacl sysvolreset >> "$LOGFILE" 2>&1; then
+    log "WARN: samba-tool ntacl sysvolreset failed"
+fi
+
+log "sync completed"
 SYNCEOF
 chmod +x /usr/local/sbin/sysvol-sync
 

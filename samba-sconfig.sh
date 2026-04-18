@@ -49,6 +49,25 @@ is_addc_running() { systemctl is-active samba-ad-dc &>/dev/null; }
 #   Input:  $1 = DC hostname or IP
 #   Stdout: one of 2003, 2008, 2008_R2, 2012, 2012_R2, 2016
 #   Return: 0 on success, 1 on query failure (stdout still prints 2008_R2)
+# Resolve an FQDN to an IPv4 address using the CURRENT system resolver.
+# If the argument is already an IPv4 literal, return it unchanged. Callers
+# must use this BEFORE rewriting /etc/resolv.conf, otherwise the new
+# nameserver (the target DC, which may not yet be reachable / ready) gets
+# asked and the lookup silently fails — the FQDN string then lands in
+# resolv.conf as-is, which kills DNS entirely and the join errors out at
+# "Looking for DC".
+resolve_dc_ip() {
+    local host="$1"
+    if [[ "$host" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+        printf '%s' "$host"
+        return 0
+    fi
+    local ip
+    ip=$(getent ahostsv4 "$host" 2>/dev/null | awk 'NR==1 {print $1}')
+    [[ -n "$ip" ]] || return 1
+    printf '%s' "$ip"
+}
+
 probe_forest_fl() {
     local dc="$1"
     local fl_num
@@ -573,14 +592,39 @@ collect_domain_info() {
     DC_DNS_FORWARDER=$(whiptail --inputbox "DNS forwarder (upstream DNS for external names):" \
         10 64 "1.1.1.1" 3>&1 1>&2 2>&3) || return 1
 
+    return 0
+}
+
+# Provisioning a new forest — prompt for the password to CREATE for the
+# built-in Administrator. Username is fixed (Administrator) because this is
+# the well-known account Samba creates during `domain provision`.
+collect_new_admin_password() {
+    DC_ADMIN_USER="Administrator"
     DC_ADMIN_PASS=$(whiptail --passwordbox \
-        "Administrator password (12+ chars, mixed case, numbers, special):" \
-        10 64 3>&1 1>&2 2>&3) || return 1
+        "Choose a password for the new forest's built-in Administrator account.\n\nMinimum 8 characters; Samba's default policy requires mixed case, digits, and a symbol." \
+        14 68 3>&1 1>&2 2>&3) || return 1
     [[ ${#DC_ADMIN_PASS} -lt 8 ]] && { info "Password too short (min 8 chars)."; return 1; }
 
     local pass_confirm
     pass_confirm=$(whiptail --passwordbox "Confirm password:" 10 64 3>&1 1>&2 2>&3) || return 1
     [[ "$DC_ADMIN_PASS" != "$pass_confirm" ]] && { info "Passwords don't match."; return 1; }
+
+    return 0
+}
+
+# Joining an existing domain — prompt for the EXISTING credentials of a
+# domain account with rights to add a DC. Defaults to Administrator but any
+# account in Domain Admins (or with delegated join rights) works.
+collect_join_credentials() {
+    DC_ADMIN_USER=$(whiptail --inputbox \
+        "Username of a domain administrator with permission to join a new DC to ${DC_NETBIOS}.\n\nDefaults to Administrator. Any account in Domain Admins (or with delegated join rights) will work." \
+        13 68 "Administrator" 3>&1 1>&2 2>&3) || return 1
+    [[ -z "$DC_ADMIN_USER" ]] && { info "Admin username required."; return 1; }
+
+    DC_ADMIN_PASS=$(whiptail --passwordbox \
+        "Enter the current password for ${DC_NETBIOS}\\\\${DC_ADMIN_USER} (these are the existing credentials used to authenticate the join — not a new password):" \
+        12 68 3>&1 1>&2 2>&3) || return 1
+    [[ -z "$DC_ADMIN_PASS" ]] && { info "Password required."; return 1; }
 
     return 0
 }
@@ -638,6 +682,40 @@ apply_hardening_to_smb_conf() {
     fi
 }
 
+# `samba-tool ntacl sysvolreset` loops forever emitting
+# "idmap range not specified for domain '*'" when smb.conf has no idmap
+# block for the catch-all domain. Samba's post-provision / post-join
+# template doesn't include one; inject a sensible default so sysvolreset
+# (and any other tool that needs SID→POSIX translation for foreign SIDs)
+# can progress. No-op on subsequent calls.
+ensure_idmap_config() {
+    local smb="/etc/samba/smb.conf"
+    [[ -f "$smb" ]] || return 0
+    grep -qE '^[[:space:]]*idmap config \* : backend' "$smb" 2>/dev/null && return 0
+
+    local tmp
+    tmp=$(mktemp)
+    awk '
+        BEGIN { inserted = 0 }
+        /^\[global\][[:space:]]*$/ && !inserted {
+            print
+            print "\tidmap config * : backend = tdb"
+            print "\tidmap config * : range = 3000000-4000000"
+            inserted = 1
+            next
+        }
+        { print }
+    ' "$smb" > "$tmp"
+
+    if [[ $(wc -l < "$tmp") -gt $(wc -l < "$smb") ]]; then
+        mv "$tmp" "$smb"
+    else
+        rm -f "$tmp"
+        echo "[sconfig] WARN: [global] not found in $smb — idmap config NOT added" >&2
+        return 1
+    fi
+}
+
 post_provision_setup() {
     local realm="$1" dns_fwd="$2"
     local realm_lower="${realm,,}"
@@ -648,6 +726,8 @@ post_provision_setup() {
     if ! grep -q "dns forwarder" /etc/samba/smb.conf 2>/dev/null; then
         sed -i "/\[global\]/a\\        dns forwarder = ${dns_fwd}" /etc/samba/smb.conf
     fi
+
+    ensure_idmap_config
 
     cat > /etc/resolv.conf << DNSEOF
 search ${realm_lower}
@@ -665,17 +745,18 @@ DNSEOF
 # under Policies/ are empty until sysvol-sync runs on a schedule. We use
 # smbclient (not rsync-over-SSH) because Windows DCs rarely have sshd.
 #
-#   Input:  $1 source DC (FQDN), $2 netbios domain, $3 admin password,
-#           $4 realm (lowercased used for the SYSVOL subtree name)
+#   Input:  $1 source DC (FQDN), $2 netbios domain, $3 admin username,
+#           $4 admin password, $5 realm (lowercased used for the SYSVOL
+#           subtree name)
 seed_sysvol() {
-    local src_dc="$1" netbios="$2" admin_pass="$3" realm="$4"
+    local src_dc="$1" netbios="$2" admin_user="$3" admin_pass="$4" realm="$5"
     local realm_lower="${realm,,}"
     local tmpdir
     tmpdir=$(mktemp -d)
 
     echo "[sconfig] seeding SYSVOL from //${src_dc}/sysvol/${realm_lower} ..."
     if smbclient "//${src_dc}/sysvol" \
-            -U "${netbios}\\administrator%${admin_pass}" \
+            -U "${netbios}\\${admin_user}%${admin_pass}" \
             -c "recurse ON; prompt OFF; lcd ${tmpdir}; mget ${realm_lower}" \
             >/dev/null 2>&1; then
         if [[ -d "${tmpdir}/${realm_lower}" ]]; then
@@ -717,12 +798,13 @@ CHRONYEOF
 # failure (8524) and refuses to add the replica link — see T3 findings.
 #
 #   Input:  $1 target DC (FQDN or IP, usually the source DC we joined from)
-#           $2 NetBIOS domain (for `${NETBIOS}\administrator`)
-#           $3 admin password
-#           $4 realm (DNS domain) — used to compose this host's FQDN
+#           $2 NetBIOS domain (for `${NETBIOS}\${admin_user}`)
+#           $3 admin username (e.g. Administrator)
+#           $4 admin password
+#           $5 realm (DNS domain) — used to compose this host's FQDN
 #   Return: 0 on success, 1 on any failure (including zone not present).
 register_own_ptr() {
-    local target_dc="$1" netbios="$2" admin_pass="$3" realm="$4"
+    local target_dc="$1" netbios="$2" admin_user="$3" admin_pass="$4" realm="$5"
     local my_ip my_fqdn reverse_zone reverse_name a b c d
 
     my_ip=$(ip -4 addr show scope global | awk '/inet /{print $2}' | cut -d/ -f1 | head -1)
@@ -735,7 +817,7 @@ register_own_ptr() {
     echo "[sconfig] registering PTR  ${reverse_name}.${reverse_zone}  →  ${my_fqdn}."
     local out ptr_ok=false
     if out=$(samba-tool dns add "$target_dc" "$reverse_zone" "$reverse_name" PTR "${my_fqdn}." \
-                -U"${netbios}\\administrator" --password="$admin_pass" 2>&1); then
+                -U"${netbios}\\${admin_user}" --password="$admin_pass" 2>&1); then
         echo "[sconfig] PTR registered on $target_dc"
         ptr_ok=true
     elif grep -qiE "already exist|DNS_ERROR_RECORD_ALREADY_EXISTS" <<< "$out"; then
@@ -751,7 +833,7 @@ register_own_ptr() {
         # next scheduled run.
         echo "[sconfig] forcing KCC on $target_dc to clear stale 8524..."
         samba-tool drs kcc "$target_dc" \
-            -U"${netbios}\\administrator" --password="$admin_pass" 2>&1 \
+            -U"${netbios}\\${admin_user}" --password="$admin_pass" 2>&1 \
             | sed 's/^/[kcc] /' || true
         return 0
     fi
@@ -768,8 +850,9 @@ register_own_ptr() {
 }
 
 domain_provision_new() {
-    local DC_REALM DC_NETBIOS DC_ADMIN_PASS DC_DNS_FORWARDER
+    local DC_REALM DC_NETBIOS DC_ADMIN_USER DC_ADMIN_PASS DC_DNS_FORWARDER
     collect_domain_info || return
+    collect_new_admin_password || return
 
     yesno "Provision NEW forest?\n\nRealm: $DC_REALM\nNetBIOS: $DC_NETBIOS\nDNS: SAMBA_INTERNAL\nForwarder: $DC_DNS_FORWARDER" || return
 
@@ -799,25 +882,33 @@ domain_provision_new() {
 }
 
 domain_join_dc() {
-    local DC_REALM DC_NETBIOS DC_ADMIN_PASS DC_DNS_FORWARDER
+    local DC_REALM DC_NETBIOS DC_ADMIN_USER DC_ADMIN_PASS DC_DNS_FORWARDER
     collect_domain_info || return
 
     local existing_dc
     existing_dc=$(whiptail --inputbox "FQDN or IP of existing DC to replicate from:" \
         10 64 "" 3>&1 1>&2 2>&3) || return
 
-    yesno "Join as ADDITIONAL DC?\n\nRealm: $DC_REALM\nSource DC: $existing_dc" || return
+    local dc_ip
+    if ! dc_ip=$(resolve_dc_ip "$existing_dc"); then
+        info "Cannot resolve '$existing_dc' via the current resolver.\nProvide an IP or fix /etc/resolv.conf first."
+        return
+    fi
+
+    collect_join_credentials || return
+
+    yesno "Join as ADDITIONAL DC?\n\nRealm: $DC_REALM\nSource DC: $existing_dc ($dc_ip)\nAs: ${DC_NETBIOS}\\\\${DC_ADMIN_USER}" || return
 
     # Auto-detect target forest functional level. Samba's default
     # `ad dc functional level = 2008_R2` silently fails against any
     # 2012+ forest with WERR_DS_INCOMPATIBLE_VERSION.
     local fl_str
-    fl_str=$(probe_forest_fl "$existing_dc")
+    fl_str=$(probe_forest_fl "$dc_ip")
 
     rm -f /etc/samba/smb.conf
     systemctl stop samba-ad-dc 2>/dev/null || true
     write_krb5_conf "$DC_REALM"
-    echo -e "search ${DC_REALM,,}\nnameserver ${existing_dc}" > /etc/resolv.conf
+    echo -e "search ${DC_REALM,,}\nnameserver ${dc_ip}" > /etc/resolv.conf
 
     whiptail --infobox "Joining domain at FL=$fl_str... This may take several minutes." 8 60
 
@@ -825,37 +916,45 @@ domain_join_dc() {
         --dns-backend=SAMBA_INTERNAL \
         --option="dns forwarder = $DC_DNS_FORWARDER" \
         --option="ad dc functional level = $fl_str" \
-        -U"${DC_NETBIOS}\\administrator" \
+        -U"${DC_NETBIOS}\\${DC_ADMIN_USER}" \
         --password="$DC_ADMIN_PASS" 2>&1 | tail -20; then
         apply_hardening_to_smb_conf
         post_provision_setup "$DC_REALM" "$DC_DNS_FORWARDER"
-        register_own_ptr "$existing_dc" "$DC_NETBIOS" "$DC_ADMIN_PASS" "$DC_REALM" || true
-        seed_sysvol "$existing_dc" "$DC_NETBIOS" "$DC_ADMIN_PASS" "$DC_REALM" || true
-        configure_chrony_for_domain "$existing_dc"
+        register_own_ptr "$dc_ip" "$DC_NETBIOS" "$DC_ADMIN_USER" "$DC_ADMIN_PASS" "$DC_REALM" || true
+        seed_sysvol "$dc_ip" "$DC_NETBIOS" "$DC_ADMIN_USER" "$DC_ADMIN_PASS" "$DC_REALM" || true
+        configure_chrony_for_domain "$dc_ip"
         _generate_tls_cert_core
         info "Joined as additional DC (FL=$fl_str)!\nRealm: $DC_REALM"
     else
-        info "Join FAILED.\n\nCheck connectivity to $existing_dc and credentials."
+        info "Join FAILED.\n\nCheck connectivity to $existing_dc ($dc_ip) and credentials."
     fi
 }
 
 domain_join_rodc() {
-    local DC_REALM DC_NETBIOS DC_ADMIN_PASS DC_DNS_FORWARDER
+    local DC_REALM DC_NETBIOS DC_ADMIN_USER DC_ADMIN_PASS DC_DNS_FORWARDER
     collect_domain_info || return
 
     local existing_dc
     existing_dc=$(whiptail --inputbox "FQDN or IP of writable DC:" \
         10 64 "" 3>&1 1>&2 2>&3) || return
 
-    yesno "Join as RODC?\n\nRealm: $DC_REALM\nSource DC: $existing_dc" || return
+    local dc_ip
+    if ! dc_ip=$(resolve_dc_ip "$existing_dc"); then
+        info "Cannot resolve '$existing_dc' via the current resolver.\nProvide an IP or fix /etc/resolv.conf first."
+        return
+    fi
+
+    collect_join_credentials || return
+
+    yesno "Join as RODC?\n\nRealm: $DC_REALM\nSource DC: $existing_dc ($dc_ip)\nAs: ${DC_NETBIOS}\\\\${DC_ADMIN_USER}" || return
 
     local fl_str
-    fl_str=$(probe_forest_fl "$existing_dc")
+    fl_str=$(probe_forest_fl "$dc_ip")
 
     rm -f /etc/samba/smb.conf
     systemctl stop samba-ad-dc 2>/dev/null || true
     write_krb5_conf "$DC_REALM"
-    echo -e "search ${DC_REALM,,}\nnameserver ${existing_dc}" > /etc/resolv.conf
+    echo -e "search ${DC_REALM,,}\nnameserver ${dc_ip}" > /etc/resolv.conf
 
     whiptail --infobox "Joining as RODC at FL=$fl_str..." 8 60
 
@@ -863,13 +962,13 @@ domain_join_rodc() {
         --dns-backend=SAMBA_INTERNAL \
         --option="dns forwarder = $DC_DNS_FORWARDER" \
         --option="ad dc functional level = $fl_str" \
-        -U"${DC_NETBIOS}\\administrator" \
+        -U"${DC_NETBIOS}\\${DC_ADMIN_USER}" \
         --password="$DC_ADMIN_PASS" 2>&1 | tail -20; then
         apply_hardening_to_smb_conf
         post_provision_setup "$DC_REALM" "$DC_DNS_FORWARDER"
-        register_own_ptr "$existing_dc" "$DC_NETBIOS" "$DC_ADMIN_PASS" "$DC_REALM" || true
-        seed_sysvol "$existing_dc" "$DC_NETBIOS" "$DC_ADMIN_PASS" "$DC_REALM" || true
-        configure_chrony_for_domain "$existing_dc"
+        register_own_ptr "$dc_ip" "$DC_NETBIOS" "$DC_ADMIN_USER" "$DC_ADMIN_PASS" "$DC_REALM" || true
+        seed_sysvol "$dc_ip" "$DC_NETBIOS" "$DC_ADMIN_USER" "$DC_ADMIN_PASS" "$DC_REALM" || true
+        configure_chrony_for_domain "$dc_ip"
         _generate_tls_cert_core
         info "Joined as RODC (FL=$fl_str)!\nRealm: $DC_REALM"
     else
@@ -998,16 +1097,19 @@ reset_admin_password() {
 #===============================================================================
 # 4. SYSVOL REPLICATION
 #===============================================================================
+SYSVOL_SYNC_KEY="/root/.ssh/sysvol-sync"
+SYSVOL_SYNC_CRED="/etc/samba/sysvol-sync.cred"
+
 menu_sysvol_sync() {
     is_provisioned || { info "Not provisioned."; return; }
 
     while true; do
         local choice
         choice=$(whiptail --title "SYSVOL Replication" \
-            --menu "Samba uses rsync-over-SSH for SYSVOL sync (no native DFS-R).\nPrimary DC: push. Replicas: pull." \
+            --menu "Samba has no DFSR — this menu sets up an out-of-band replacement.\n  ssh: rsync-over-SSH (Samba ↔ Samba; remote DC must run sshd)\n  smb: smbclient pull from //REMOTE/sysvol (works against Windows DCs)" \
             $WT_HEIGHT $WT_WIDTH $WT_MENU_HEIGHT \
             "1" "Configure SYSVOL Sync" \
-            "2" "Generate SSH Key Pair" \
+            "2" "Generate SSH Key Pair (ssh transport)" \
             "3" "Dry Run (test sync)" \
             "4" "Run Sync Now" \
             "5" "Reset SYSVOL ACLs" \
@@ -1028,54 +1130,157 @@ menu_sysvol_sync() {
 }
 
 configure_sysvol_sync() {
-    local sync_role
-    sync_role=$(whiptail --title "Sync Role" \
-        --menu "Is this the PRIMARY (push) or REPLICA (pull)?" 12 60 4 \
-        "pull"  "REPLICA — pull from primary" \
-        "push"  "PRIMARY — push to replica" \
+    local transport
+    transport=$(whiptail --title "Sync Transport" \
+        --menu "Choose how to replicate SYSVOL from the remote DC.\n\n  ssh: rsync-over-SSH (Samba ↔ Samba only; remote DC must run sshd)\n  smb: smbclient pull from //REMOTE/sysvol (pull-only; works against Windows DCs)" \
+        15 72 2 \
+        "ssh" "rsync over SSH (requires sshd on remote)" \
+        "smb" "smbclient pull (works against Windows DCs; pull-only)" \
         3>&1 1>&2 2>&3) || return
 
-    local remote_dc remote_user interval
-    remote_dc=$(whiptail --inputbox "FQDN or IP of the other DC:" 10 64 "" 3>&1 1>&2 2>&3) || return
-    remote_user=$(whiptail --inputbox "SSH user on remote DC:" 10 64 "root" 3>&1 1>&2 2>&3) || return
-    interval=$(whiptail --inputbox "Sync interval (minutes):" 10 64 "5" 3>&1 1>&2 2>&3) || return
+    local remote_dc interval
+    remote_dc=$(whiptail --inputbox "FQDN or IP of the remote DC:" 10 64 "" 3>&1 1>&2 2>&3) || return
+    [[ -z "$remote_dc" ]] && { info "Remote DC is required."; return; }
 
-    cat > /etc/samba/sysvol-sync.conf << SCEOF
+    interval=$(whiptail --inputbox "Sync interval (minutes, 1-59):" 10 64 "5" 3>&1 1>&2 2>&3) || return
+    [[ "$interval" =~ ^[0-9]+$ ]] || { info "Interval must be a positive integer."; return; }
+    (( interval >= 1 && interval <= 59 )) || { info "Interval must be between 1 and 59 minutes."; return; }
+
+    case "$transport" in
+        ssh)
+            local sync_role remote_user
+            sync_role=$(whiptail --title "Sync Role" \
+                --menu "Is this DC the PRIMARY (push) or REPLICA (pull)?" 12 60 2 \
+                "pull" "REPLICA — pull from primary" \
+                "push" "PRIMARY — push to replica" \
+                3>&1 1>&2 2>&3) || return
+
+            remote_user=$(whiptail --inputbox \
+                "SSH login user on remote DC (needs access to /var/lib/samba/sysvol/):" \
+                11 68 "root" 3>&1 1>&2 2>&3) || return
+            [[ -z "$remote_user" ]] && { info "Remote user is required."; return; }
+
+            # Generate SSH key BEFORE the cron entry is installed, so the
+            # first scheduled run can't fire while the key file is still
+            # missing (the v1 flow left a window where cron.d/sysvol-sync
+            # would log a keyfile error every few minutes until the user
+            # hit menu item 2).
+            if [[ ! -f "$SYSVOL_SYNC_KEY" ]]; then
+                mkdir -p /root/.ssh; chmod 700 /root/.ssh
+                ssh-keygen -t ed25519 -f "$SYSVOL_SYNC_KEY" -N "" \
+                    -C "sysvol-sync@$(hostname -s)" >/dev/null
+            fi
+
+            umask 077
+            cat > /etc/samba/sysvol-sync.conf <<SCEOF
+SYNC_TRANSPORT="ssh"
 SYNC_ROLE="${sync_role}"
 REMOTE_DC="${remote_dc}"
 REMOTE_USER="${remote_user}"
-SSH_KEY="/root/.ssh/sysvol-sync"
+SSH_KEY="${SYSVOL_SYNC_KEY}"
 SCEOF
+            chmod 640 /etc/samba/sysvol-sync.conf
+            umask 022
 
-    echo "*/${interval} * * * * root /usr/local/sbin/sysvol-sync" > /etc/cron.d/sysvol-sync
+            whiptail --title "SSH public key" --scrolltext --msgbox \
+                "Add this key to ${remote_user}@${remote_dc}'s authorized_keys before the cron timer next fires:\n\n$(cat "${SYSVOL_SYNC_KEY}.pub")" \
+                16 76
+            ;;
+
+        smb)
+            local admin_netbios admin_user admin_pass
+            admin_netbios=$(whiptail --inputbox \
+                "NetBIOS domain for smbclient authentication:" \
+                10 64 "$(get_netbios)" 3>&1 1>&2 2>&3) || return
+            [[ -z "$admin_netbios" ]] && { info "NetBIOS domain is required."; return; }
+
+            admin_user=$(whiptail --inputbox \
+                "Account used to read //${remote_dc}/sysvol (Administrator or any account with read access):" \
+                12 68 "Administrator" 3>&1 1>&2 2>&3) || return
+            [[ -z "$admin_user" ]] && { info "Admin user is required."; return; }
+
+            admin_pass=$(whiptail --passwordbox \
+                "Password for ${admin_netbios}\\\\${admin_user} (existing account — NOT being created):" \
+                10 68 3>&1 1>&2 2>&3) || return
+            [[ -z "$admin_pass" ]] && { info "Password is required."; return; }
+
+            # smbclient -A reads username=/password=/domain= lines. Keep the
+            # file root-only — it contains a domain admin password.
+            umask 077
+            cat > "$SYSVOL_SYNC_CRED" <<CRED
+username = ${admin_user}
+password = ${admin_pass}
+domain = ${admin_netbios}
+CRED
+            chmod 600 "$SYSVOL_SYNC_CRED"
+            chown root:root "$SYSVOL_SYNC_CRED"
+
+            cat > /etc/samba/sysvol-sync.conf <<SCEOF
+SYNC_TRANSPORT="smb"
+SYNC_ROLE="pull"
+REMOTE_DC="${remote_dc}"
+SMB_CRED_FILE="${SYSVOL_SYNC_CRED}"
+SCEOF
+            chmod 640 /etc/samba/sysvol-sync.conf
+            umask 022
+            ;;
+    esac
+
+    # Install the cron job LAST — only now that the key file / credentials
+    # file actually exist. PATH is set explicitly because cron's default
+    # leaves out /usr/local/sbin and some Samba installs put samba-tool there.
+    cat > /etc/cron.d/sysvol-sync <<CRON
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+*/${interval} * * * * root /usr/local/sbin/sysvol-sync
+CRON
     chmod 644 /etc/cron.d/sysvol-sync
 
-    info "Configured.\nRole: ${sync_role} | Remote: ${remote_dc}\nInterval: ${interval}min\n\nNext: Generate SSH key (2), then test (3)."
+    info "Configured.\nTransport: ${transport} | Remote: ${remote_dc} | Every ${interval} min\n\nNext: run Dry Run (menu 3) to verify, then Run Sync Now (menu 4)."
 }
 
 generate_sync_sshkey() {
-    local key_path="/root/.ssh/sysvol-sync"
-    [[ -f "$key_path" ]] && ! yesno "Key exists. Overwrite?" && return
+    [[ -f "$SYSVOL_SYNC_KEY" ]] && ! yesno "Key exists. Overwrite?" && return
 
     mkdir -p /root/.ssh; chmod 700 /root/.ssh
-    ssh-keygen -t ed25519 -f "$key_path" -N "" -C "sysvol-sync@$(hostname -s)"
+    ssh-keygen -t ed25519 -f "$SYSVOL_SYNC_KEY" -N "" -C "sysvol-sync@$(hostname -s)"
 
     whiptail --title "Public Key" --scrolltext --msgbox \
-        "Copy to remote DC's /root/.ssh/authorized_keys:\n\n$(cat ${key_path}.pub)" 14 76
+        "Copy to remote DC's authorized_keys:\n\n$(cat "${SYSVOL_SYNC_KEY}.pub")" 14 76
 }
 
 test_sysvol_sync() {
     [[ -f /etc/samba/sysvol-sync.conf ]] || { info "Not configured."; return; }
+    # shellcheck disable=SC1091
     source /etc/samba/sysvol-sync.conf
     whiptail --infobox "Dry run..." 6 40
     local output
-    case "${SYNC_ROLE:-pull}" in
-        pull) output=$(rsync -avzn --delete -e "ssh -i ${SSH_KEY} -o StrictHostKeyChecking=no" \
-                "${REMOTE_USER}@${REMOTE_DC}:/var/lib/samba/sysvol/" "/var/lib/samba/sysvol/" --exclude='*.tmp' 2>&1) ;;
-        push) output=$(rsync -avzn --delete -e "ssh -i ${SSH_KEY} -o StrictHostKeyChecking=no" \
-                "/var/lib/samba/sysvol/" "${REMOTE_USER}@${REMOTE_DC}:/var/lib/samba/sysvol/" --exclude='*.tmp' 2>&1) ;;
+    case "${SYNC_TRANSPORT:-ssh}" in
+        ssh)
+            [[ -f "${SSH_KEY:-}" ]] || { info "SSH key '${SSH_KEY:-}' missing. Generate it (menu 2) or re-run configure."; return; }
+            case "${SYNC_ROLE:-pull}" in
+                pull) output=$(rsync -avzn --delete --max-delete=100 \
+                        -e "ssh -i ${SSH_KEY} -o StrictHostKeyChecking=no -o BatchMode=yes" \
+                        "${REMOTE_USER}@${REMOTE_DC}:/var/lib/samba/sysvol/" \
+                        "/var/lib/samba/sysvol/" --exclude='*.tmp' 2>&1) ;;
+                push) output=$(rsync -avzn --delete --max-delete=100 \
+                        -e "ssh -i ${SSH_KEY} -o StrictHostKeyChecking=no -o BatchMode=yes" \
+                        "/var/lib/samba/sysvol/" \
+                        "${REMOTE_USER}@${REMOTE_DC}:/var/lib/samba/sysvol/" --exclude='*.tmp' 2>&1) ;;
+            esac
+            ;;
+        smb)
+            [[ -f "${SMB_CRED_FILE:-}" ]] || { info "Credentials file '${SMB_CRED_FILE:-}' missing. Re-run configure."; return; }
+            local realm_lower
+            realm_lower=$(get_realm | tr '[:upper:]' '[:lower:]')
+            output=$(smbclient "//${REMOTE_DC}/sysvol" -A "$SMB_CRED_FILE" \
+                -c "ls ${realm_lower}\\*" 2>&1)
+            ;;
+        *)
+            info "Unknown SYNC_TRANSPORT '${SYNC_TRANSPORT}'."
+            return
+            ;;
     esac
-    whiptail --title "Dry Run" --scrolltext --msgbox "$output" 20 76
+    whiptail --title "Dry Run (${SYNC_TRANSPORT:-ssh})" --scrolltext --msgbox "$output" 20 76
 }
 
 run_sysvol_sync() {
@@ -1088,6 +1293,11 @@ run_sysvol_sync() {
 
 reset_sysvol_acls() {
     yesno "Reset SYSVOL ACLs?" || return
+    # Older deployments provisioned/joined before the idmap-config fix will
+    # loop here forever with "idmap range not specified for domain '*'".
+    # Calling ensure_idmap_config is idempotent and cheap; it guarantees
+    # sysvolreset can make progress regardless of how smb.conf got there.
+    ensure_idmap_config
     local output; output=$(samba-tool ntacl sysvolreset 2>&1)
     info "ACLs reset.\n${output}"
 }
@@ -1095,12 +1305,17 @@ reset_sysvol_acls() {
 show_sync_status() {
     local st="SYSVOL Sync Status\n==================\n\n"
     if [[ -f /etc/samba/sysvol-sync.conf ]]; then
+        # shellcheck disable=SC1091
         source /etc/samba/sysvol-sync.conf
-        st+="Role: ${SYNC_ROLE:-?} | Remote: ${REMOTE_DC:-?}\nKey: ${SSH_KEY:-?}\n\n"
+        st+="Transport: ${SYNC_TRANSPORT:-ssh} | Role: ${SYNC_ROLE:-?} | Remote: ${REMOTE_DC:-?}\n"
+        case "${SYNC_TRANSPORT:-ssh}" in
+            ssh) st+="User: ${REMOTE_USER:-?} | Key: ${SSH_KEY:-?}\n\n" ;;
+            smb) st+="Credentials file: ${SMB_CRED_FILE:-?}\n\n" ;;
+        esac
     else
         st+="Not configured.\n\n"
     fi
-    [[ -f /etc/cron.d/sysvol-sync ]] && st+="Cron: $(cat /etc/cron.d/sysvol-sync)\n\n" || st+="Cron: not installed\n\n"
+    [[ -f /etc/cron.d/sysvol-sync ]] && st+="Cron:\n$(cat /etc/cron.d/sysvol-sync)\n\n" || st+="Cron: not installed\n\n"
     [[ -f /var/log/samba/sysvol-sync.log ]] && st+="Last 10 lines:\n$(tail -10 /var/log/samba/sysvol-sync.log)\n" || st+="No sync log yet.\n"
     whiptail --title "Sync Status" --scrolltext --msgbox "$st" 22 76
 }
@@ -1438,34 +1653,42 @@ cli_join_dc() {
     : "${SC_DC:?SC_DC env var required (target DC FQDN or IP)}"
     : "${SC_PASS:?SC_PASS env var required}"
     SC_FWD="${SC_FWD:-$SC_DC}"
-    SC_ROLE="${SC_ROLE:-DC}"   # DC or RODC
+    SC_ROLE="${SC_ROLE:-DC}"           # DC or RODC
+    SC_ADMIN="${SC_ADMIN:-Administrator}"
 
     local DC_REALM="${SC_REALM^^}"
     local DC_NETBIOS="${SC_NETBIOS^^}"
+    local DC_ADMIN_USER="$SC_ADMIN"
     local DC_ADMIN_PASS="$SC_PASS"
     local DC_DNS_FORWARDER="$SC_FWD"
 
+    local dc_ip
+    if ! dc_ip=$(resolve_dc_ip "$SC_DC"); then
+        echo "[sconfig] cannot resolve SC_DC='$SC_DC' via the current resolver — pass an IP or fix /etc/resolv.conf" >&2
+        return 1
+    fi
+
     local fl_str
-    fl_str=$(probe_forest_fl "$SC_DC")
+    fl_str=$(probe_forest_fl "$dc_ip")
     echo "[sconfig] forest FL probe: $fl_str"
 
     rm -f /etc/samba/smb.conf
     systemctl stop samba-ad-dc 2>/dev/null || true
     write_krb5_conf "$DC_REALM"
-    echo -e "search ${DC_REALM,,}\nnameserver ${SC_DC}" > /etc/resolv.conf
+    echo -e "search ${DC_REALM,,}\nnameserver ${dc_ip}" > /etc/resolv.conf
 
-    echo "[sconfig] joining $DC_REALM as $SC_ROLE via $SC_DC (FL=$fl_str)..."
+    echo "[sconfig] joining $DC_REALM as $SC_ROLE via $SC_DC ($dc_ip), user=${DC_NETBIOS}\\${DC_ADMIN_USER}, FL=$fl_str..."
     if samba-tool domain join "$DC_REALM" "$SC_ROLE" \
         --dns-backend=SAMBA_INTERNAL \
         --option="dns forwarder = $DC_DNS_FORWARDER" \
         --option="ad dc functional level = $fl_str" \
-        -U"${DC_NETBIOS}\\administrator" \
+        -U"${DC_NETBIOS}\\${DC_ADMIN_USER}" \
         --password="$DC_ADMIN_PASS"; then
         apply_hardening_to_smb_conf
         post_provision_setup "$DC_REALM" "$DC_DNS_FORWARDER"
-        register_own_ptr "$SC_DC" "$DC_NETBIOS" "$DC_ADMIN_PASS" "$DC_REALM" || true
-        seed_sysvol "$SC_DC" "$DC_NETBIOS" "$DC_ADMIN_PASS" "$DC_REALM" || true
-        configure_chrony_for_domain "$SC_DC"
+        register_own_ptr "$dc_ip" "$DC_NETBIOS" "$DC_ADMIN_USER" "$DC_ADMIN_PASS" "$DC_REALM" || true
+        seed_sysvol "$dc_ip" "$DC_NETBIOS" "$DC_ADMIN_USER" "$DC_ADMIN_PASS" "$DC_REALM" || true
+        configure_chrony_for_domain "$dc_ip"
         _generate_tls_cert_core
         echo "[sconfig] JOIN SUCCESS (FL=$fl_str) — TLS cert has SAN, PTR registered, SYSVOL seeded"
     else
@@ -1479,8 +1702,12 @@ usage_cli() {
     cat <<USAGE
 Usage: samba-sconfig                  # interactive TUI
        samba-sconfig probe-fl <dc>    # print detected forest FL string
-       samba-sconfig join-dc          # headless join; env: SC_REALM, SC_NETBIOS,
-                                      # SC_DC, SC_PASS [SC_FWD] [SC_ROLE=DC|RODC]
+       samba-sconfig join-dc          # headless join
+           required env: SC_REALM, SC_NETBIOS, SC_DC (FQDN or IP), SC_PASS
+           optional env: SC_FWD (default: SC_DC)
+                         SC_ROLE=DC|RODC (default: DC)
+                         SC_ADMIN (default: Administrator) — any domain
+                                  account with join rights
 USAGE
 }
 
