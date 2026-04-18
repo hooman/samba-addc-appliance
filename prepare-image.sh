@@ -30,22 +30,55 @@ export DEBIAN_FRONTEND=noninteractive
 #===============================================================================
 # 1. REMOVE UNNECESSARY PACKAGES
 #===============================================================================
+# This is a special-purpose AD DC appliance — it only serves LDAP / Kerberos
+# / SMB / DNS / time to domain clients, and is administered via SSH + a small
+# TUI. That lets us strip everything Debian ships "in case you need it" that
+# a DC never needs: mail delivery, wireless/Bluetooth/audio stacks, laptop
+# detection, hardware discovery, user-facing Debian community tooling, and
+# translations for our single-locale environment.
 log "Removing unnecessary packages to minimize image size..."
 
 REMOVE_PKGS=(
     # Spell-check stack
     ispell iamerican ibritish ienglish-common wamerican
     dictionaries-common emacsen-common
-    # Post-install tools
+    # Post-install / installer artifacts
     installation-report
-    # Laptop/desktop detection
-    laptop-detect
+    tasksel tasksel-data task-english
     # Multi-boot GRUB probing (useless in VM)
     os-prober
-    # Task metapackages (only used during install)
-    task-english tasksel tasksel-data
-    # Desktop-oriented packages
+    # Laptop / desktop detection
+    laptop-detect
+    # Desktop-oriented hooks
     xdg-user-dirs shared-mime-info
+
+    # Mail stack — the appliance sends no mail. apt-listchanges / mailutils
+    # pull exim4 in as a Recommends, so explicitly purge the lot. The
+    # unattended-upgrades install below uses --no-install-recommends to
+    # keep them from sneaking back in.
+    exim4 exim4-base exim4-config exim4-daemon-light
+    bsd-mailx mailutils
+    apt-listchanges
+
+    # Debian community / end-user tooling that has no place on a server
+    # appliance we don't hand out to end users.
+    reportbug python3-reportbug
+    popularity-contest
+    debian-faq doc-debian
+
+    # debconf prompts only run in English on this appliance (locale is set
+    # to en_US.UTF-8 below); the ~2 MB of translation catalogs aren't used.
+    debconf-i18n
+
+    # Real-hardware bits that never apply to a VM DC.
+    eject
+    discover discover-data
+    # Wireless — VMs don't have radios. The regulatory DB alone is ~1 MB.
+    wpasupplicant wireless-regdb crda iw
+    # Bluetooth
+    bluez bluetooth
+    # Audio
+    alsa-utils pulseaudio
 )
 
 for pkg in "${REMOVE_PKGS[@]}"; do
@@ -144,7 +177,11 @@ apt-get install -y chrony
 # 7. UNATTENDED-UPGRADES FRAMEWORK
 #===============================================================================
 log "Installing unattended-upgrades framework..."
-apt-get install -y unattended-upgrades apt-listchanges
+# --no-install-recommends: the default Recommends are apt-listchanges (which
+# drags in bsd-mailx → exim4), needrestart, powermgmt-base, python3-gi — all
+# purged above or irrelevant to a headless DC. Admin can tail
+# /var/log/unattended-upgrades/ directly; no mail pathway needed.
+apt-get install -y --no-install-recommends unattended-upgrades
 
 # Default to disabled — sconfig sets the policy per deployment
 cat > /etc/apt/apt.conf.d/20auto-upgrades << 'UAEOF'
