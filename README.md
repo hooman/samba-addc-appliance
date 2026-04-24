@@ -222,6 +222,13 @@ lab/run-scenario.sh join-dc --dry-cleanup
 
 Every run writes a transcript to `test-results/<scenario>-<timestamp>.log`.
 
+`lab/run-scenario.sh` is a thin wrapper around `../lab-kit/bin/run-scenario.sh`.
+It sets `LAB_ENV=lab/samba.env`, resolves the scenario short-name to a file in
+`lab/scenarios/`, and forwards flags. The `--no-cleanup` / `--dry-cleanup`
+flags set `SC_SKIP_CLEANUP` / `SC_DRY_CLEANUP` env vars which scenarios read
+in their `pre_hook` (only `join-dc` uses them today — the smoke scenario
+has no AD cleanup).
+
 For the full test plan and important tests to add next, see
 [`docs/LAB-TESTING.md`](docs/LAB-TESTING.md).
 

@@ -18,6 +18,25 @@ SC_PASS="${SC_PASS:-P@ssword123456!}"
 SC_ADMIN="${SC_ADMIN:-Administrator}"
 SC_ROLE="${SC_ROLE:-DC}"
 
+# pre_hook: strip stale samba-* records from WS2025-DC1 before re-joining.
+# A Samba join leaves durable objects in AD (computer account, NTDS Settings,
+# DNS records, replication links) that a VM revert alone doesn't undo. Without
+# this step, a second join run hits "object already exists" errors.
+#
+# Respects two env flags set by lab/run-scenario.sh:
+#   SC_SKIP_CLEANUP=1  -> skip entirely
+#   SC_DRY_CLEANUP=1   -> run with -DryRun (inspect only)
+pre_hook() {
+    if [[ "${SC_SKIP_CLEANUP:-0}" == "1" ]]; then
+        say "skipping WS2025 cleanup (SC_SKIP_CLEANUP=1)"
+        return 0
+    fi
+    local dry=""
+    [[ "${SC_DRY_CLEANUP:-0}" == "1" ]] && dry="-DryRun"
+    step "Reset-LabDomainState on WS2025-DC1 ${dry:+(dry-run)}"
+    ssh_host "pwsh -File D:\\ISO\\lab-scripts\\Reset-LabDomainState.ps1 $dry"
+}
+
 run_scenario() {
     ssh_vm "sudo env \
         SC_REALM='$SC_REALM' \

@@ -10,24 +10,30 @@ replication, SYSVOL, certificates, and recovery from common deployment mistakes.
 
 ## Test Runner Model
 
-`lab/run-scenario.sh` runs from the Mac. A scenario is a shell file in
-`lab/scenarios/` that defines:
+`lab/run-scenario.sh` runs from the Mac. It is a thin wrapper that invokes the
+generic `../lab-kit/bin/run-scenario.sh` with `LAB_ENV=lab/samba.env`. A
+scenario is a shell file in `lab/scenarios/` that defines:
 
 | Function | Required | Purpose |
 | --- | --- | --- |
 | `run_scenario` | yes | Performs the action under test, usually over SSH into `samba-dc1`. |
 | `verify` | yes | Asserts the desired final state and returns non-zero on failure. |
-| `pre_hook` | no | Optional setup after VM revert and Windows cleanup. |
+| `pre_hook` | no | Optional setup after VM revert and push, e.g. WS2025-side AD cleanup. |
 | `post_hook` | no | Optional evidence collection or cleanup after verification. |
 
-The runner handles the common setup:
+The generic pipeline (from `lab-kit`) is:
 
-1. Stage `lab/*.ps1` and `lab/*.xml` to `/Volumes/ISO/lab-scripts`.
-2. Revert `samba-dc1` to `golden-image`.
-3. Clean stale Samba records from `WS2025-DC1`.
-4. Push the current `prepare-image.sh` and `samba-sconfig.sh`.
-5. Run the scenario and verify it.
-6. Write a full log under `test-results/`.
+1. Stage helper scripts listed in `LAB_STAGE_SOURCES` to `LAB_STAGE_DIR`
+   (`/Volumes/ISO/lab-scripts`). For Samba this pulls from this repo plus
+   `../lab-kit/hypervisors/hyperv/` and `../lab-router/hypervisors/hyperv/`.
+2. Revert `samba-dc1` to `golden-image` via `Revert-TestVM.ps1`.
+3. Push `prepare-image.sh` and `samba-sconfig.sh` to the VM.
+4. Run `LAB_POST_PUSH_CMD` (installs `samba-sconfig` under `/usr/local/sbin`).
+5. `pre_hook` (scenario-owned — this is where AD cleanup now lives, e.g. in
+   `join-dc.sh`; the smoke scenario does not need cleanup).
+6. `run_scenario` and `verify`.
+7. `post_hook`.
+8. Transcript is written to `test-results/<scenario>-<timestamp>.log`.
 
 ## Existing Scenario
 
