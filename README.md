@@ -27,8 +27,8 @@ SYSVOL handling.
 | --- | --- |
 | `prepare-image.sh` | One-time Debian image preparation. Installs Samba AD DC dependencies, PowerShell, chrony, nftables, and appliance helper scripts. |
 | `samba-sconfig.sh` | Main appliance configuration tool. Provides the whiptail TUI and a small headless CLI for automated tests. |
-| `lab/` | Hyper-V lab automation for router, WS2025 DC, Samba test VMs, reset helpers, and scenarios. |
-| `lab/run-scenario.sh` | Mac-side test runner that reverts the Samba VM, cleans the Windows lab state, pushes current scripts, runs a scenario, and verifies results. |
+| `lab/` | Samba-specific Hyper-V automation: WS2025 DC build, baseline apply, Samba test VM creation, cleanup, and the scenario runner. Generic pieces (revert, router) now live in the sibling repos. |
+| `lab/run-scenario.sh` | Mac-side test runner that reverts the Samba VM, cleans the Windows lab state, pushes current scripts, runs a scenario, and verifies results. Stages PS scripts from this repo plus `../lab-kit/hypervisors/hyperv/` and `../lab-router/hypervisors/hyperv/`. |
 | `lab/scenarios/` | Scenario definitions. `join-dc.sh` is the current end-to-end additional-DC test. |
 | `test-results/` | Distilled historical notes, topology, and regression reports. Raw `*.log` transcripts are local-only. |
 | `AGENTS.md` | Vendor-neutral coding-agent guide for this repo. |
@@ -70,8 +70,9 @@ through a gateway.
 | Samba DC under test | `samba-dc1` | `10.10.10.20` | Debian 13 appliance candidate. |
 | Optional second Samba DC | `samba-dc2` | `10.10.10.21` | Useful for Samba-to-Samba SYSVOL and replication tests. |
 
-DHCP reservations live in `lab/seed/dnsmasq-samba-lab.conf`. Hyper-V VM MAC
-addresses in the PowerShell scripts are pinned to match those reservations.
+DHCP reservations live in the sibling `lab-router` repo at
+`configs/samba-addc.dnsmasq.conf`. Hyper-V VM MAC addresses in the PowerShell
+scripts are pinned to match those reservations.
 
 ## First-Time Lab Setup
 
@@ -97,8 +98,11 @@ which qemu-img hdiutil curl
 
 ### 2. Stage router artifacts
 
+Router staging now lives in the sibling `lab-router` repo:
+
 ```bash
-lab/stage-router-artifacts.sh --extra-dnsmasq lab/seed/dnsmasq-samba-lab.conf
+../lab-router/scripts/stage-router-artifacts.sh \
+    --extra-dnsmasq ../lab-router/configs/samba-addc.dnsmasq.conf
 ```
 
 This creates or refreshes:
@@ -111,12 +115,18 @@ cloud-init templates or dnsmasq reservations change.
 
 ### 3. Stage host-side lab scripts
 
+The host needs PowerShell scripts from all three sibling repos staged into one
+place:
+
 ```bash
 mkdir -p /Volumes/ISO/lab-scripts
 cp lab/*.ps1 lab/*.xml /Volumes/ISO/lab-scripts/
+cp ../lab-kit/hypervisors/hyperv/*.ps1 /Volumes/ISO/lab-scripts/
+cp ../lab-router/hypervisors/hyperv/*.ps1 /Volumes/ISO/lab-scripts/
 ```
 
-Repeat this after editing any PowerShell or unattend files.
+Repeat this after editing any PowerShell or unattend files. `lab/run-scenario.sh`
+also re-stages from all three sources automatically on every run.
 
 ### 4. Build the router
 

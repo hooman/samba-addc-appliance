@@ -139,11 +139,31 @@ trap 'say "EXIT rc=$rc  log=$LOG"' EXIT
 step "scenario=$SCENARIO log=$LOG"
 
 # 1. Stage host-side PS/XML scripts.
+#
+# We stage from three sibling repos so the Samba runner keeps working after
+# the router and generic-runner scripts moved to lab-router and lab-kit:
+#   - samba-addc-appliance/lab/*.ps1 *.xml   — Samba-specific
+#   - ../lab-kit/hypervisors/hyperv/*.ps1    — generic (e.g. Revert-TestVM)
+#   - ../lab-router/hypervisors/hyperv/*.ps1 — router (e.g. New-LabRouter)
+# The siblings are expected checkouts per docs/REPO-SPLIT.md.
+LAB_KIT_HV="${LAB_KIT_HV:-$REPO_DIR/../lab-kit/hypervisors/hyperv}"
+LAB_ROUTER_HV="${LAB_ROUTER_HV:-$REPO_DIR/../lab-router/hypervisors/hyperv}"
+
 if [[ $STAGE -eq 1 ]]; then
-    step "stage lab/*.ps1 lab/*.xml → $STAGE_DIR"
+    step "stage PS/XML scripts from Samba + lab-kit + lab-router → $STAGE_DIR"
     if [[ -d "$STAGE_DIR" ]]; then
         cp -f "$SCRIPT_DIR"/*.ps1 "$STAGE_DIR"/ 2>/dev/null || true
         cp -f "$SCRIPT_DIR"/*.xml "$STAGE_DIR"/ 2>/dev/null || true
+        if [[ -d "$LAB_KIT_HV" ]]; then
+            cp -f "$LAB_KIT_HV"/*.ps1 "$STAGE_DIR"/ 2>/dev/null || true
+        else
+            say "WARN: $LAB_KIT_HV not found — Revert-TestVM.ps1 will be missing"
+        fi
+        if [[ -d "$LAB_ROUTER_HV" ]]; then
+            cp -f "$LAB_ROUTER_HV"/*.ps1 "$STAGE_DIR"/ 2>/dev/null || true
+        else
+            say "WARN: $LAB_ROUTER_HV not found — New-LabRouter.ps1 will be missing"
+        fi
         ls -la "$STAGE_DIR"/*.ps1 2>/dev/null | tail -20
     else
         say "WARN: $STAGE_DIR not mounted — skipping stage"
