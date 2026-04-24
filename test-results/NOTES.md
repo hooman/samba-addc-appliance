@@ -3,6 +3,9 @@
 Format: observations, surprises, and decisions made while executing
 the test plan. Intended source material for a write-up.
 
+Raw `*.log` transcripts mentioned in older notes were local run artifacts and
+are no longer tracked. This file and `REPORT.md` keep the durable findings.
+
 ## Environment snapshot (start of run)
 
 - **Date:** 2026-04-16
@@ -85,11 +88,11 @@ Caveats uncovered that will matter for T2:
   package install list in `prepare-image.sh`. Will verify whether it actually
   affects T2 (samba-sconfig's firewall step should install/activate rules).
 
-Result written to `T1-smoke.log`.
+Raw result transcript was kept locally; durable findings are captured here.
 
 ### T2 — Join WS2025 as additional DC — **PASS** after one config fix
 
-First attempt (documented in `T2-join.log`) failed with:
+First attempt failed with:
 
 ```
 ERROR(runtime): uncaught exception - DsAddEntry failed
@@ -154,7 +157,8 @@ Also noted in passing:
   we are joining (or the lab gateway) with `ntpsigndsocket` for SNTP
   signing support.
 
-Result written to `T2-join.log` and `T2-join-ws2025-events.log`.
+Raw join and event transcripts were kept locally; durable findings are
+captured here.
 
 ### T3 — Replication + functional — **PASS** with one pre-fix, one structural Samba gap
 
@@ -229,7 +233,8 @@ The TGT is stored against `root` (because we used `sudo`), but `smbclient` is ev
 - `smbclient ... -U 'Administrator@LAB.TEST' --password=...` (no `-k`; uses SPNEGO/GSSAPI with explicit creds).
 - **Taxonomy: A (our scripts/docs).** Worth a note in the `samba-sconfig` "Test SYSVOL" menu.
 
-Results in `T3-replication.log` and `T3-functional.log`.
+Raw replication and functional transcripts were kept locally; durable findings
+are captured here.
 
 ### T4 — Baseline compliance — **mostly PASS**, one baseline gap worth flagging
 
@@ -330,5 +335,4 @@ deploy AD CS or manually install a DC cert. Not a Samba concern.
 | LDAPS (Samba side) | Self-signed, no SAN, 2y validity | Expects real cert w/ SAN | ⚠️ A-taxonomy: needs sconfig cert management |
 | LDAPS (WS2025 side) | N/A | No cert; needs AD CS | Out of scope |
 
-Result in `T4-baseline.log`.
-
+Raw baseline transcript was kept locally; durable findings are captured here.

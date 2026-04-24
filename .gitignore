@@ -30,3 +30,7 @@ Temporary Items
 .cursor/
 .continue/
 .aider*
+
+# Scenario transcripts are local evidence. Keep distilled findings in
+# test-results/*.md instead of committing raw run logs.
+test-results/*.log

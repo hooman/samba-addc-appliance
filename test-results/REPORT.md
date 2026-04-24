@@ -3,7 +3,9 @@
 - **Run date:** 2026-04-16
 - **Scenario:** Debian 13 / Samba 4.22.8 joining a Windows Server 2025 forest with the MSFT WS2025-2602 Security Baseline applied
 - **Topology:** 1 × WS2025-DC1 (172.22.0.10) + 1 × samba-dc1 (172.22.0.20) on Hyper-V `Lab-Internal` (172.22.0.0/24, no NAT)
-- **Deliverables referenced:** per-test logs in `test-results/*.log`, running notes in [`NOTES.md`](./NOTES.md), topology diagram `topology.drawio.svg`
+- **Deliverables referenced:** distilled running notes in [`NOTES.md`](./NOTES.md)
+  and topology diagram `topology.drawio.svg`. Raw `*.log` transcripts were
+  local run artifacts and are no longer tracked.
 
 ## Result summary
 
@@ -162,7 +164,7 @@ end-to-end with **zero manual intervention** on the first attempt.
 | 3 | `apply_hardening_to_smb_conf()` now inserts *into* `[global]` via awk (not appended to EOF) | `samba-sconfig.sh` rewrite | `testparm -s` reports "Loaded services file OK" with zero warnings; all hardening values visible in output |
 | 3 | `kerberos encryption types = aes256-... aes128-...` was syntactically invalid; Samba accepts only `{all,strong,legacy}` | `samba-sconfig.sh` hardening block | `kerberos encryption types = strong` (AES-only); testparm OK |
 | 4 | `_generate_tls_cert_core()` — replaces Samba's auto-generated SAN-less cert with a 10-year self-signed cert that has `DNS:<fqdn>`, `DNS:<shortname>`, `IP:<primary ipv4>`, `keyUsage`, `extendedKeyUsage serverAuth+clientAuth` | `samba-sconfig.sh` refactored from TUI `generate_tls_cert` | `openssl s_client -connect samba-dc1:636 -showcerts \| openssl x509` shows SAN entries; `tls keyfile/certfile/cafile` properly in `[global]` |
-| — | Headless test entry point: `samba-sconfig probe-fl <dc>` / `samba-sconfig join-dc` (env-driven: `SC_REALM`, `SC_NETBIOS`, `SC_DC`, `SC_PASS` [`SC_FWD` `SC_ROLE`]) so `run-tests.sh` and ad-hoc debugging don't need `expect` | `samba-sconfig.sh` new CLI dispatcher | Full regression ran end-to-end via `sudo env SC_… samba-sconfig join-dc`, log in `test-results/regression.log` |
+| - | Headless test entry point: `samba-sconfig probe-fl <dc>` / `samba-sconfig join-dc` (env-driven: `SC_REALM`, `SC_NETBIOS`, `SC_DC`, `SC_PASS` [`SC_FWD` `SC_ROLE`]) so `run-tests.sh` and ad-hoc debugging don't need `expect` | `samba-sconfig.sh` new CLI dispatcher | Full regression ran end-to-end via `sudo env SC_... samba-sconfig join-dc`; raw transcript kept local |
 
 ### Taxonomy B items (Samba upstream / spec gaps) — no regression possible from our side, but documented
 
@@ -240,8 +242,8 @@ is discarded immediately. Verified clean: `/showrepl /errorsonly` reports
 [sconfig] JOIN SUCCESS (FL=2016) — TLS cert has SAN, PTR registered, SYSVOL seeded
 ```
 
-Full capture in `test-results/regression-v2.log`. Same T1-T4 outcomes as
-the previous regression, plus:
+Raw capture was kept as a local transcript. Same T1-T4 outcomes as the
+previous regression, plus:
 
 - **No add/remove-NIC dance at any step** — Debian install via DHCP on
   Lab-NAT, prepare-image.sh runs with the Internet natively reachable.
@@ -389,4 +391,5 @@ Samba's hardening already matches: `ldap server require strong auth = yes`,
 The RC4 and password-policy findings are **Windows-side production
 hardening concerns**, not Samba-interop blockers.
 
-Full output in `test-results/T4-baseline-v2.log`.
+Full raw output was kept as a local transcript; the durable findings are
+captured above.

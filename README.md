@@ -30,9 +30,10 @@ SYSVOL handling.
 | `lab/` | Hyper-V lab automation for router, WS2025 DC, Samba test VMs, reset helpers, and scenarios. |
 | `lab/run-scenario.sh` | Mac-side test runner that reverts the Samba VM, cleans the Windows lab state, pushes current scripts, runs a scenario, and verifies results. |
 | `lab/scenarios/` | Scenario definitions. `join-dc.sh` is the current end-to-end additional-DC test. |
-| `test-results/` | Historical logs, notes, topology, and regression reports from lab runs. |
-| `CLAUDE.md` | Detailed operational notes for this specific lab. Useful when continuing live lab work. |
-| `HANDOFF.md` | Step-by-step setup checklist for handing the lab to an automation agent or another operator. |
+| `test-results/` | Distilled historical notes, topology, and regression reports. Raw `*.log` transcripts are local-only. |
+| `AGENTS.md` | Vendor-neutral coding-agent guide for this repo. |
+| `CLAUDE.md` | Claude Code compatibility pointer back to `AGENTS.md`. |
+| `HANDOFF.md` | Retired handoff pointer to maintained docs. |
 
 ## Intended Workflow
 
