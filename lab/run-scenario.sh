@@ -16,6 +16,13 @@
 # Exit 0 = verify passed, non-zero otherwise. Every cycle writes a complete
 # transcript to test-results/<scenario>-<UTC-timestamp>.log.
 #
+# Why the runner is opinionated:
+#   A Samba join leaves durable objects in AD: computer account, NTDS Settings,
+#   DNS records, replication links, and sometimes failed KCC state. Reverting
+#   only the Debian VM is not enough for a clean test. The default path resets
+#   both sides, pushes the current scripts, and verifies final state so each
+#   run is a real regression instead of a lucky rerun against stale lab data.
+#
 # Scenarios contribute:
 #   run_scenario   — the body that exercises the system under test
 #   verify         — assertions; returns 0 on pass

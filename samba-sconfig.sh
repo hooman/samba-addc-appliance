@@ -7,6 +7,16 @@
 # on Debian 13 (Trixie).
 #
 # Usage: sudo samba-sconfig
+#
+# Maintainer map:
+#   - TUI menu functions collect input and confirm destructive operations.
+#   - Shared helpers do the real work and are also used by the headless CLI at
+#     the bottom of this file.
+#   - Keep deployment-specific decisions out of prepare-image.sh. If a value
+#     depends on realm, source DC, client subnet, or role, set it here.
+#   - Samba/Windows interop has several non-obvious requirements. Comments near
+#     probe_forest_fl, register_own_ptr, seed_sysvol, and chrony explain the
+#     failure modes those helpers prevent.
 #===============================================================================
 set -uo pipefail
 
@@ -41,19 +51,11 @@ get_iface()     { ip -4 route show default 2>/dev/null | awk '{print $5}' | head
 is_provisioned() { [[ -f /etc/samba/smb.conf ]] && grep -q 'server role.*active directory' /etc/samba/smb.conf 2>/dev/null; }
 is_addc_running() { systemctl is-active samba-ad-dc &>/dev/null; }
 
-# Query the target DC's rootDSE forestFunctionality attribute (anonymous bind;
-# rootDSE is per spec accessible without auth, even under the WS-baseline
-# LDAP-signing policy) and return the matching Samba `ad dc functional level`
-# string. Falls back to 2008_R2 (Samba's historical default) on any failure.
-#
-#   Input:  $1 = DC hostname or IP
-#   Stdout: one of 2003, 2008, 2008_R2, 2012, 2012_R2, 2016
-#   Return: 0 on success, 1 on query failure (stdout still prints 2008_R2)
 # Resolve an FQDN to an IPv4 address using the CURRENT system resolver.
 # If the argument is already an IPv4 literal, return it unchanged. Callers
 # must use this BEFORE rewriting /etc/resolv.conf, otherwise the new
-# nameserver (the target DC, which may not yet be reachable / ready) gets
-# asked and the lookup silently fails — the FQDN string then lands in
+# nameserver (the target DC, which may not yet be reachable or ready) gets
+# asked and the lookup silently fails. The FQDN string then lands in
 # resolv.conf as-is, which kills DNS entirely and the join errors out at
 # "Looking for DC".
 resolve_dc_ip() {
@@ -68,6 +70,20 @@ resolve_dc_ip() {
     printf '%s' "$ip"
 }
 
+# Query the target DC's rootDSE forestFunctionality attribute and return the
+# matching Samba `ad dc functional level` string. rootDSE is queried
+# anonymously: per LDAP/AD convention it remains readable even when the Windows
+# security baseline requires LDAP signing for normal binds.
+#
+# This prevents a costly false lead. Samba's historical default is 2008_R2;
+# Windows Server 2025 forests are typically FL 2016. If we let Samba advertise
+# the old default, `samba-tool domain join` can fail with
+# WERR_DS_INCOMPATIBLE_VERSION during NTDS Settings creation, which looks like
+# a schema or permission problem until you inspect the Windows event log.
+#
+#   Input:  $1 = DC hostname or IP
+#   Stdout: one of 2003, 2008, 2008_R2, 2012, 2012_R2, 2016
+#   Return: 0 on success, 1 on query failure (stdout still prints 2008_R2)
 probe_forest_fl() {
     local dc="$1"
     local fl_num
@@ -162,7 +178,10 @@ first_boot_wizard() {
         read -r _
     fi
 
-    # 3. Pin DHCP lease as static
+    # 3. Pin DHCP lease as static. The lab uses DHCP reservations to mimic a
+    # real appliance landing on an existing LAN, but AD DCs still need stable
+    # addressing. Writing a static config here gives production-like behavior
+    # after first boot while keeping initial install simple.
     local addr_source
     addr_source=$(get_addr_source)
     if [[ "$addr_source" == "dhcp" ]]; then
@@ -682,7 +701,7 @@ apply_hardening_to_smb_conf() {
     fi
 }
 
-# `samba-tool ntacl sysvolreset` loops forever emitting
+# `samba-tool ntacl sysvolreset` can loop forever emitting
 # "idmap range not specified for domain '*'" when smb.conf has no idmap
 # block for the catch-all domain. Samba's post-provision / post-join
 # template doesn't include one; inject a sensible default so sysvolreset
@@ -720,6 +739,9 @@ post_provision_setup() {
     local realm="$1" dns_fwd="$2"
     local realm_lower="${realm,,}"
 
+    # Samba tools look in private/krb5.conf, while admins expect the system
+    # Kerberos config in /etc. Use one source of truth so the TUI, CLI, kinit,
+    # and Samba agree after both provision and join.
     rm -f /var/lib/samba/private/krb5.conf
     ln -s /etc/krb5.conf /var/lib/samba/private/krb5.conf
 
@@ -774,8 +796,10 @@ seed_sysvol() {
 }
 
 # Re-point chrony at a domain time source. Called post-join / post-provision.
-# The prepare-image.sh skeleton has no NTP servers baked in (isolated-network
-# friendly), so this is where the deployment-specific source gets configured.
+# The image skeleton has no NTP servers baked in. That avoids public-pool
+# assumptions and lets this function use the correct source: the existing DC
+# when joining, or a chosen upstream/client subnet when this host is the first
+# DC in a new deployment.
 configure_chrony_for_domain() {
     local ntp_source="$1" subnet="${2:-}"
     local conf="/etc/chrony/chrony.conf"
@@ -794,8 +818,9 @@ CHRONYEOF
 }
 
 # Register this host's PTR in the target forest's reverse zone so Windows DC
-# KCC replication works. WS2016+ KCC treats a missing PTR as a DNS lookup
-# failure (8524) and refuses to add the replica link — see T3 findings.
+# KCC replication works. The forward records created by Samba are not enough
+# in the WS2025 lab: Windows can resolve the source DC GUID CNAME and A record
+# but still cache replication error 8524 when the source IP has no PTR.
 #
 #   Input:  $1 target DC (FQDN or IP, usually the source DC we joined from)
 #           $2 NetBIOS domain (for `${NETBIOS}\${admin_user}`)
@@ -1641,6 +1666,9 @@ menu_power() {
 # The TUI is the primary UX. These subcommands mirror a subset of the TUI
 # operations for scripted verification (see test-results/ regression runs)
 # and so `run-tests.sh` can drive the appliance without `expect`.
+# Add new commands here when a test needs to exercise TUI behavior. Prefer a
+# narrow command that reuses existing helpers over automating whiptail screens;
+# the latter is brittle and tends to hide the real failure output.
 #===============================================================================
 cli_probe_fl() {
     local dc="${1:?usage: samba-sconfig probe-fl <dc-fqdn-or-ip>}"

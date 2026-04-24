@@ -11,6 +11,12 @@
 #
 # After running, snapshot the VM. Use samba-sconfig for per-deployment config.
 #
+# Design rule: this script prepares an image, but it does not decide the
+# domain. Anything that depends on the eventual realm, source DC, client
+# subnet, or deployment role belongs in samba-sconfig.sh. That is why files
+# such as krb5.conf and chrony.conf are skeletons here and are completed
+# later during provision or join.
+#
 # Usage: sudo bash prepare-image.sh
 #===============================================================================
 set -euo pipefail
@@ -30,12 +36,12 @@ export DEBIAN_FRONTEND=noninteractive
 #===============================================================================
 # 1. REMOVE UNNECESSARY PACKAGES
 #===============================================================================
-# This is a special-purpose AD DC appliance — it only serves LDAP / Kerberos
-# / SMB / DNS / time to domain clients, and is administered via SSH + a small
-# TUI. That lets us strip everything Debian ships "in case you need it" that
-# a DC never needs: mail delivery, wireless/Bluetooth/audio stacks, laptop
-# detection, hardware discovery, user-facing Debian community tooling, and
-# translations for our single-locale environment.
+# This is a special-purpose AD DC appliance: LDAP, Kerberos, SMB, DNS, and
+# domain time. Administration is SSH plus samba-sconfig. The package purge
+# below removes general-purpose Debian extras that add attack surface, boot
+# noise, or image size but do not help a VM domain controller. Keep this list
+# conservative; predictable image preparation matters more than shaving every
+# possible package.
 log "Removing unnecessary packages to minimize image size..."
 
 REMOVE_PKGS=(
@@ -198,10 +204,11 @@ log "Installing Microsoft PowerShell..."
 
 PWSH_INSTALLED=false
 
-# Debian 13 (Trixie) switched to `sqv` for apt signature verification, which
-# rejects Microsoft's current repo key (missing subkey EE4D7792F748182B). The
-# MS apt repo is therefore unusable on Trixie — install from GitHub .deb
-# instead. Clean up any stale repo file from prior runs.
+# Debian 13 (Trixie) switched apt signature verification to sqv/Sequoia, which
+# rejects Microsoft's current repo metadata signature because the published
+# keyring is missing the subkey used to sign it. Installing the direct GitHub
+# .deb is less elegant than an apt repo, but it is deterministic in this image
+# build and avoids leaving a half-configured Microsoft source behind.
 rm -f /etc/apt/sources.list.d/microsoft.list /usr/share/keyrings/microsoft-archive-keyring.gpg
 
 PWSH_VER="7.6.0"
@@ -266,9 +273,10 @@ fi
 log "Stopping and disabling Samba services until samba-sconfig takes over..."
 systemctl stop samba winbind nmbd smbd samba-ad-dc 2>/dev/null || true
 systemctl disable samba winbind nmbd smbd samba-ad-dc 2>/dev/null || true
-# Mask only the file-server daemons. Do NOT mask samba.service itself — it is
-# an alias slot used by samba-ad-dc.service; masking it via /dev/null symlink
-# breaks `systemctl enable samba-ad-dc` after a join/provision.
+# Mask only the member/file-server daemons. Do NOT mask samba.service itself:
+# on Debian it is also an alias path used by samba-ad-dc.service. A /dev/null
+# mask there makes later `systemctl enable samba-ad-dc` look broken even after
+# a successful domain provision or join.
 systemctl mask winbind nmbd smbd 2>/dev/null || true
 
 #===============================================================================
@@ -292,10 +300,10 @@ KRBEOF
 # 15. SKELETON CHRONY.CONF
 #===============================================================================
 log "Writing chrony skeleton..."
-# Deliberately no NTP servers here — samba-sconfig adds the correct source
-# (the domain controller being joined, or user-provided upstream) at deploy
-# time. Leaving internet pools baked in breaks isolated-network deployments
-# and, on AD networks, conflicts with the domain's authoritative time source.
+# Deliberately no NTP servers here. AD time has topology rules: a joined DC
+# should follow the domain source, while a first DC may need to serve the
+# client subnet. samba-sconfig knows which case applies; the image builder
+# does not. Baking public pools into the golden image also breaks isolated labs.
 cat > /etc/chrony/chrony.conf << 'CHRONEOF'
 # Time sources are configured per deployment by samba-sconfig.
 # Until sconfig runs, this host relies on the hypervisor time-sync service
@@ -411,7 +419,9 @@ cat > /usr/local/sbin/sysvol-sync << 'SYNCEOF'
 #        DFSR owns the source of truth on the Windows side.
 #
 # Configuration lives in /etc/samba/sysvol-sync.conf (written by
-# samba-sconfig). This script never writes that file.
+# samba-sconfig). This script intentionally never prompts and never writes that
+# file, so it is safe to run from cron/systemd and easy for tests to reason
+# about.
 
 set -u -o pipefail
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin

@@ -4,6 +4,10 @@
 # Sourced by lab/run-scenario.sh. Has access to ssh_host / ssh_vm /
 # scp_to_vm / say / step helpers and the HV_* / VM_* variables.
 #
+# The scenario intentionally drives the headless samba-sconfig CLI instead of
+# the whiptail TUI. That keeps the test focused on appliance behavior and gives
+# the log complete command output when a join fails.
+#
 # Overridable via env (run the driver with `SC_ADMIN=alice ./lab/run-scenario.sh join-dc`):
 #   SC_REALM, SC_NETBIOS, SC_DC, SC_PASS, SC_ADMIN, SC_ROLE
 
@@ -68,6 +72,9 @@ verify() {
     ssh_vm 'sudo openssl x509 -noout -ext subjectAltName -in /var/lib/samba/private/tls/cert.pem 2>&1 | head -5' || rc=1
 
     say "verification from WS2025-DC1 side"
+    # Samba can look healthy locally while Windows has cached KCC/DNS errors.
+    # The Windows-side verifier catches missing PTR, stale 8524, and outbound
+    # replication failures that `samba-tool drs showrepl` will not see.
     out=$(ssh_host "pwsh -File D:\\ISO\\lab-scripts\\Verify-JoinFromWS2025.ps1 -SambaIP '$VM_IP' -Realm '$SC_REALM'" || true)
     echo "$out"
     if grep -q '^FAIL' <<< "$out"; then
