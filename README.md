@@ -99,7 +99,16 @@ which qemu-img hdiutil curl
 
 ### 2. Stage router artifacts
 
-Router staging now lives in the sibling `lab-router` repo:
+Router staging now lives in the sibling `lab-router` repo. Prefer the YAML
+config (requires `yq`; `brew install yq`):
+
+```bash
+../lab-router/scripts/stage-router-artifacts.sh \
+    --config ../lab-router/configs/samba-addc.yaml
+```
+
+The pre-YAML invocation using the raw dnsmasq snippet still works if you
+don't want to install `yq`:
 
 ```bash
 ../lab-router/scripts/stage-router-artifacts.sh \
