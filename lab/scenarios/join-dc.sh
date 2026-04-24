@@ -34,7 +34,7 @@ pre_hook() {
     local dry=""
     [[ "${SC_DRY_CLEANUP:-0}" == "1" ]] && dry="-DryRun"
     step "Reset-LabDomainState on WS2025-DC1 ${dry:+(dry-run)}"
-    ssh_host "pwsh -File D:\\ISO\\lab-scripts\\Reset-LabDomainState.ps1 $dry"
+    ssh_host "pwsh -File ${LAB_HOST_STAGE_DIR}\\Reset-LabDomainState.ps1 $dry"
 }
 
 run_scenario() {
