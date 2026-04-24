@@ -85,7 +85,9 @@ Stage lab scripts to the host share:
 
 ```bash
 mkdir -p /Volumes/ISO/lab-scripts
-cp lab/*.ps1 lab/*.xml /Volumes/ISO/lab-scripts/
+cp lab/hyperv/*.ps1 lab/hyperv/*.xml /Volumes/ISO/lab-scripts/
+cp ../lab-kit/hypervisors/hyperv/*.ps1 /Volumes/ISO/lab-scripts/
+cp ../lab-router/hypervisors/hyperv/*.ps1 /Volumes/ISO/lab-scripts/
 ```
 
 Run scenario tests:

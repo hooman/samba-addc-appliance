@@ -27,7 +27,8 @@ SYSVOL handling.
 | --- | --- |
 | `prepare-image.sh` | One-time Debian image preparation. Installs Samba AD DC dependencies, PowerShell, chrony, nftables, and appliance helper scripts. |
 | `samba-sconfig.sh` | Main appliance configuration tool. Provides the whiptail TUI and a small headless CLI for automated tests. |
-| `lab/` | Samba-specific Hyper-V automation: WS2025 DC build, baseline apply, Samba test VM creation, cleanup, and the scenario runner. Generic pieces (revert, router) now live in the sibling repos. |
+| `lab/` | Samba test harness: runner, env, scenarios, and Hyper-V helpers under `lab/hyperv/`. Generic pieces (revert, router) live in the sibling repos. |
+| `lab/hyperv/` | Hyper-V/WS2025-specific PowerShell + unattend XML: WS2025 DC build, baseline apply, Samba test VM creation, AD cleanup, verification. |
 | `lab/run-scenario.sh` | Mac-side test runner that reverts the Samba VM, cleans the Windows lab state, pushes current scripts, runs a scenario, and verifies results. Stages PS scripts from this repo plus `../lab-kit/hypervisors/hyperv/` and `../lab-router/hypervisors/hyperv/`. |
 | `lab/scenarios/` | Scenario definitions. `join-dc.sh` is the current end-to-end additional-DC test. |
 | `test-results/` | Distilled historical notes, topology, and regression reports. Raw `*.log` transcripts are local-only. |
@@ -120,7 +121,7 @@ place:
 
 ```bash
 mkdir -p /Volumes/ISO/lab-scripts
-cp lab/*.ps1 lab/*.xml /Volumes/ISO/lab-scripts/
+cp lab/hyperv/*.ps1 lab/hyperv/*.xml /Volumes/ISO/lab-scripts/
 cp ../lab-kit/hypervisors/hyperv/*.ps1 /Volumes/ISO/lab-scripts/
 cp ../lab-router/hypervisors/hyperv/*.ps1 /Volumes/ISO/lab-scripts/
 ```
