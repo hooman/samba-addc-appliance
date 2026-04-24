@@ -6,20 +6,25 @@ headless server product: prepare a clean image once, then use a local
 `sconfig`-style tool to provision, join, harden, diagnose, and maintain the
 domain controller.
 
-The repo currently contains compatibility copies of the Hyper-V lab scripts
-that exercise the appliance against a Windows Server 2025 forest with Microsoft
-security baseline GPOs applied. The longer-term direction is a three-repo
-layout developed side by side:
+The appliance is exercised against a Windows Server 2025 forest with
+Microsoft security baseline GPOs applied. The lab is built from three
+sibling repositories:
 
-- `lab-kit`: reusable appliance lab orchestration
-- `lab-router`: simple reusable lab router VM
-- `samba-addc-appliance`: this Samba appliance and its scenarios
+- [`lab-kit`](../lab-kit/) — reusable appliance lab orchestration
+- [`lab-router`](../lab-router/) — simple reusable lab router VM
+- `samba-addc-appliance` — this Samba appliance and its scenarios
 
-See [`docs/REPO-SPLIT.md`](docs/REPO-SPLIT.md) for the split plan.
+See [`docs/REPO-SPLIT.md`](docs/REPO-SPLIT.md) for the split history and
+current repo boundaries.
 
-The lab exists because most of the important behavior is interoperability behavior:
-Kerberos, LDAP signing, Samba replication, Windows KCC expectations, DNS, and
-SYSVOL handling.
+The lab exists because most of the important behavior is interoperability
+behavior: Kerberos, LDAP signing, Samba replication, Windows KCC
+expectations, DNS, and SYSVOL handling.
+
+**New here?** Start with [`docs/SETUP.md`](docs/SETUP.md) — it walks
+through Mac tools, the Hyper-V host, external artifacts (ISOs + Microsoft
+baseline), sibling-repo checkout, and a verification checklist. Return
+to "First-Time Lab Setup" below once that passes.
 
 ## Repository Map
 
@@ -32,9 +37,13 @@ SYSVOL handling.
 | `lab/run-scenario.sh` | Mac-side test runner that reverts the Samba VM, cleans the Windows lab state, pushes current scripts, runs a scenario, and verifies results. Stages PS scripts from this repo plus `../lab-kit/hypervisors/hyperv/` and `../lab-router/hypervisors/hyperv/`. |
 | `lab/scenarios/` | Scenario definitions. `join-dc.sh` is the current end-to-end additional-DC test. |
 | `test-results/` | Distilled historical notes, topology, and regression reports. Raw `*.log` transcripts are local-only. |
+| `docs/SETUP.md` | From-scratch development + test environment setup. Read this first. |
+| `docs/LAB-TESTING.md` | Scenario runner model, existing + planned scenarios, useful assertions. |
+| `docs/REPO-SPLIT.md` | Three-repo layout, boundaries, and migration history. |
+| `docs/AGENTIC-DEVELOPMENT.md` | Multi-agent collaboration conventions for this repo. |
 | `AGENTS.md` | Vendor-neutral coding-agent guide for this repo. |
 | `CLAUDE.md` | Claude Code compatibility pointer back to `AGENTS.md`. |
-| `HANDOFF.md` | Retired handoff pointer to maintained docs. |
+| `HANDOFF.md` | Retired placeholder; points at the maintained docs above. |
 
 ## Intended Workflow
 
@@ -72,32 +81,20 @@ through a gateway.
 | Optional second Samba DC | `samba-dc2` | `10.10.10.21` | Useful for Samba-to-Samba SYSVOL and replication tests. |
 
 DHCP reservations live in the sibling `lab-router` repo at
-`configs/samba-addc.dnsmasq.conf`. Hyper-V VM MAC addresses in the PowerShell
-scripts are pinned to match those reservations.
+[`configs/samba-addc.yaml`](../lab-router/configs/samba-addc.yaml) (or
+the equivalent dnsmasq snippet at `configs/samba-addc.dnsmasq.conf`).
+Hyper-V VM MAC addresses in the PowerShell scripts are pinned to match
+those reservations.
 
 ## First-Time Lab Setup
 
-These commands are run from the Mac unless noted.
+Environment prerequisites (Mac tools, Hyper-V host, external ISOs, SSH to
+the host, sibling-repo checkout) are covered in
+[`docs/SETUP.md`](docs/SETUP.md). The steps below assume that guide has
+been followed and all verification commands pass. Everything here runs
+from the Mac unless noted.
 
-### 1. Check prerequisites
-
-You need:
-
-- Passwordless SSH to the Hyper-V host as `nmadmin@server`.
-- `/Volumes/ISO` mounted and writable. This maps to `D:\ISO\` on the host.
-- `qemu-img`, `hdiutil`, and `curl` on the Mac.
-- Windows Server 2025 and Debian installer ISOs staged in `/Volumes/ISO`.
-- `WS2025-2602-Security-Baseline.zip` staged in `/Volumes/ISO`.
-
-Quick checks:
-
-```bash
-ssh nmadmin@server 'hostname'
-touch /Volumes/ISO/.write-test && rm /Volumes/ISO/.write-test
-which qemu-img hdiutil curl
-```
-
-### 2. Stage router artifacts
+### 1. Stage router artifacts
 
 Router staging now lives in the sibling `lab-router` repo. Prefer the YAML
 config (requires `yq`; `brew install yq`):
@@ -123,7 +120,7 @@ This creates or refreshes:
 The VHDX is reused; the seed ISO is cheap to regenerate whenever the router
 cloud-init templates or dnsmasq reservations change.
 
-### 3. Stage host-side lab scripts
+### 2. Stage host-side lab scripts
 
 The host needs PowerShell scripts from all three sibling repos staged into one
 place:
@@ -138,7 +135,7 @@ cp ../lab-router/hypervisors/hyperv/*.ps1 /Volumes/ISO/lab-scripts/
 Repeat this after editing any PowerShell or unattend files. `lab/run-scenario.sh`
 also re-stages from all three sources automatically on every run.
 
-### 4. Build the router
+### 3. Build the router
 
 Run on the Hyper-V host through SSH:
 
@@ -152,14 +149,22 @@ Verify from the Mac:
 ssh -J nmadmin@server hm@10.10.10.1 'cat /var/log/router-ready.marker; sudo nft list table ip nat'
 ```
 
-### 5. Build the WS2025 domain controller
+### 4. Build the WS2025 domain controller
 
 ```bash
 ssh nmadmin@server 'pwsh -File D:\ISO\lab-scripts\New-WS2025Lab.ps1'
 ```
 
-Wait until promotion and phase 2 complete. If you have a wait helper staged,
-run it; otherwise use PowerShell Direct as described in `HANDOFF.md`.
+Wait until promotion and phase 2 complete. You can poll the completion
+marker from the host:
+
+```bash
+ssh nmadmin@server 'pwsh -Command "Invoke-Command -VMName WS2025-DC1 -Credential (Get-Credential LAB\\Administrator) -ScriptBlock { Test-Path C:\\Setup\\setup-complete.marker }"'
+```
+
+`FirstLogon-PromoteToDC.ps1` registers a RunOnce that completes phase 2
+automatically after the post-promotion reboot; no manual intervention is
+needed beyond waiting.
 
 Then apply the Microsoft baseline:
 
@@ -167,7 +172,7 @@ Then apply the Microsoft baseline:
 ssh nmadmin@server 'pwsh -File D:\ISO\lab-scripts\Apply-SecurityBaseline.ps1'
 ```
 
-### 6. Create the Samba test VM
+### 5. Create the Samba test VM
 
 ```bash
 ssh nmadmin@server 'pwsh -File D:\ISO\lab-scripts\New-SambaTestVM.ps1 -VMName samba-dc1 -Start'
@@ -187,7 +192,7 @@ Verify:
 ssh -J nmadmin@server debadmin@10.10.10.20 'sudo -n true && echo OK'
 ```
 
-### 7. Prepare and checkpoint the image
+### 6. Prepare and checkpoint the image
 
 Copy the scripts to the VM and run image preparation:
 

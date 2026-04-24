@@ -14,19 +14,20 @@ Build and test a Samba Active Directory Domain Controller appliance on Debian
 - `samba-sconfig.sh`: whiptail TUI plus headless CLI for provision, join,
   hardening, diagnostics, and service maintenance.
 
-The repo also contains compatibility copies of the current Hyper-V lab scripts.
-The target direction is a three-repo setup:
+The three-repo layout is complete; this repo consumes `lab-kit` and
+`lab-router` as siblings. No compatibility copies remain.
 
 - `lab-kit`: reusable appliance lab orchestration.
 - `lab-router`: simple reusable lab router appliance.
 - `samba-addc-appliance`: this Samba appliance and its Samba-specific tests.
 
-See:
+Start here if you are new to the environment:
 
-- `README.md`
-- `docs/REPO-SPLIT.md`
-- `docs/LAB-TESTING.md`
-- `docs/AGENTIC-DEVELOPMENT.md`
+- `docs/SETUP.md` — Mac + Hyper-V host + ISOs + sibling checkout
+- `README.md` — repo map, lab build procedure, test workflow
+- `docs/REPO-SPLIT.md` — layout and boundaries
+- `docs/LAB-TESTING.md` — scenario model and test plan
+- `docs/AGENTIC-DEVELOPMENT.md` — multi-agent collaboration norms
 
 ## Current Lab Model
 

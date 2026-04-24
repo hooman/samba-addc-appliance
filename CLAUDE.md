@@ -13,4 +13,6 @@ Claude-specific interpretation:
 - Do not put general project knowledge only in `.claude/`; promote useful
   knowledge into tracked docs.
 - The old Hyper-V handoff content was retired. Current setup and testing docs
-  are in `README.md`, `docs/LAB-TESTING.md`, and `docs/REPO-SPLIT.md`.
+  are in `README.md`, [`docs/SETUP.md`](docs/SETUP.md),
+  [`docs/LAB-TESTING.md`](docs/LAB-TESTING.md), and
+  [`docs/REPO-SPLIT.md`](docs/REPO-SPLIT.md).
