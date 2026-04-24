@@ -24,5 +24,9 @@ Network Trash Folder
 Temporary Items
 .apdisk
 
-# Claude Code workspace (local settings, scheduled task locks)
+# Private local coding-agent workspaces and settings.
 .claude/
+.codex/
+.cursor/
+.continue/
+.aider*
