@@ -419,21 +419,41 @@ log "Installing sysvol-sync helper..."
 cat > /usr/local/sbin/sysvol-sync << 'SYNCEOF'
 #!/usr/bin/env bash
 #
-# sysvol-sync — periodic SYSVOL replication for Samba AD DC deployments.
+# sysvol-sync — multi-source, version-aware SYSVOL puller for Samba DCs.
 #
-# Samba has no native DFSR, so ongoing /var/lib/samba/sysvol replication
-# is this script's responsibility. Two transports are supported:
+# Samba doesn't implement DFSR. This helper keeps /var/lib/samba/sysvol/
+# converged with peers (Windows or Samba) by, on each cycle:
 #
-#   ssh: rsync-over-SSH. Samba ↔ Samba only (Windows DCs typically have no
-#        sshd). Primary runs SYNC_ROLE=push, replicas run SYNC_ROLE=pull.
-#   smb: smbclient pull from //REMOTE_DC/sysvol. Pull-only; works against
-#        Windows or Samba. Not usable for pushing INTO a Windows DC —
-#        DFSR owns the source of truth on the Windows side.
+#   1. discovering all DCs in the forest from the local Samba SAM
+#      (objectClass=server under CN=Sites,CN=Configuration);
+#   2. classifying each peer Windows vs Samba via the computer object's
+#      operatingSystem attribute (Windows DCs get tier 1, Samba peers tier 2);
+#   3. probing TCP/445 reachability with a short timeout — unreachable peers
+#      are silently skipped, so a multi-day outage of any single DC is fine;
+#   4. enumerating local GPOs (objectClass=groupPolicyContainer) and, for
+#      each one whose on-disk GPT.INI Version is behind its AD versionNumber,
+#      asking each candidate (highest tier first) whether IT has the version
+#      we need AND its own LDAP versionNumber matches its on-disk GPT.INI
+#      (settled, no DFSR mid-flight). The first peer that answers yes is
+#      used as the source.
+#   5. The chosen GPO is pulled into a staging tmpdir and rsync'd into place
+#      atomically per-GPO, then `samba-tool ntacl sysvolreset` is run once at
+#      the end if any GPO actually changed.
 #
-# Configuration lives in /etc/samba/sysvol-sync.conf (written by
-# samba-sconfig). This script intentionally never prompts and never writes that
-# file, so it is safe to run from cron/systemd and easy for tests to reason
-# about.
+# Authentication uses smbclient -P (Privileged), which makes Samba's own
+# tooling pick up this DC's machine credentials directly from
+# /var/lib/samba/private/secrets.tdb. No admin password on disk, no separate
+# keytab to manage, no kinit dance — Samba's machine identity is the same
+# identity that AD already trusts for replication.
+#
+# Configuration: /etc/samba/sysvol-sync.conf  (managed by samba-sconfig)
+#   PREFERRED_DCS=""    optional, space-separated FQDNs to try first (tier 0)
+#   EXCLUDE_DCS=""      optional, space-separated FQDNs to never use as a source
+#   SYNC_INTERVAL=15    minutes between cron firings (consumed by samba-sconfig)
+#
+# CLI:
+#   sysvol-sync                  one normal sync cycle (the cron entrypoint)
+#   sysvol-sync --status         print a freshness table; do not pull anything
 
 set -u -o pipefail
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -442,111 +462,353 @@ export PATH
 CONF="/etc/samba/sysvol-sync.conf"
 LOCKFILE="/run/sysvol-sync.lock"
 LOGFILE="/var/log/samba/sysvol-sync.log"
+SAMDB="/var/lib/samba/private/sam.ldb"
+SMBCONF="/etc/samba/smb.conf"
 
-[[ -f "$CONF" ]] || { echo "ERROR: $CONF not found. Run samba-sconfig." >&2; exit 1; }
-# shellcheck disable=SC1090
-. "$CONF"
+MODE="${1:-sync}"   # sync (default) | --status
 
 mkdir -p "$(dirname "$LOGFILE")"
-log()   { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOGFILE"; }
-fatal() { log "ERROR: $*"; exit 1; }
 
-exec 200>"$LOCKFILE"
-if ! flock -n 200; then
-    log "skip: another sysvol-sync is already running"
+if [[ "$MODE" == "--status" ]]; then
+    say() { printf '%s\n' "$*"; }
+else
+    say() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOGFILE"; }
+fi
+fatal() { say "ERROR: $*"; exit 1; }
+
+[[ -f "$SMBCONF" ]] || fatal "smb.conf not found"
+[[ -f "$SAMDB"   ]] || fatal "Samba SAM not found at $SAMDB (DC not provisioned?)"
+# shellcheck disable=SC1090
+[[ -f "$CONF" ]] && . "$CONF" || true   # config is optional; defaults are fine
+
+PREFERRED_DCS="${PREFERRED_DCS:-}"
+EXCLUDE_DCS="${EXCLUDE_DCS:-}"
+
+# Single-instance lock for the sync mode; --status is read-only and skipped.
+if [[ "$MODE" == "sync" ]]; then
+    exec 200>"$LOCKFILE"
+    flock -n 200 || { say "skip: another sysvol-sync is already running"; exit 0; }
+fi
+
+# --- environment from smb.conf -------------------------------------------------
+read_smbconf_param() {
+    awk -v key="$1" -F= '
+        $1 ~ "^[[:space:]]*"key"[[:space:]]*$" {
+            sub(/^[[:space:]]+/, "", $2); sub(/[[:space:]]+$/, "", $2)
+            print $2; exit
+        }
+    ' "$SMBCONF"
+}
+
+REALM=$(read_smbconf_param "realm")
+[[ -n "$REALM" ]] || fatal "could not read 'realm' from $SMBCONF"
+REALM="${REALM^^}"
+REALM_LC="${REALM,,}"
+BASE_DN="DC=${REALM_LC//./,DC=}"
+
+NETBIOS_SELF=$(read_smbconf_param "netbios name")
+[[ -z "$NETBIOS_SELF" ]] && NETBIOS_SELF="$(hostname -s)"
+NETBIOS_SELF="${NETBIOS_SELF^^}"
+
+say "start: realm=$REALM self=$NETBIOS_SELF mode=$MODE"
+
+# --- helpers ------------------------------------------------------------------
+ldb() { ldbsearch -H "$SAMDB" "$@" 2>/dev/null; }
+
+# Parse Version= out of a GPT.INI file. Echoes 0 if file missing or malformed.
+parse_gpt_ini_version() {
+    local ini="$1"
+    [[ -f "$ini" ]] || { echo 0; return; }
+    local v
+    v=$(awk -F= 'tolower($1) ~ /^[[:space:]]*version[[:space:]]*$/ {
+                     gsub(/[[:space:]\r]/, "", $2); print $2; exit }' "$ini")
+    [[ -n "$v" ]] || v=0
+    echo "$v"
+}
+
+# Read the local GPT.INI Version for a GPO directory. GPT.INI casing varies
+# across GPO authoring tools — Windows serves the file case-insensitively
+# over SMB, but Samba stores whichever case the original writer used.
+read_local_gpt_version() {
+    local dir="$1"          # /var/lib/samba/sysvol/<realm>/Policies/{GUID}
+    for cand in "$dir/GPT.INI" "$dir/gpt.ini" "$dir/Gpt.ini"; do
+        [[ -f "$cand" ]] && { parse_gpt_ini_version "$cand"; return; }
+    done
+    echo 0
+}
+
+# Pull a single file from a peer's sysvol share into a local destination.
+# -P (Privileged) tells Samba's smbclient to authenticate using the local
+# DC's machine credentials directly from secrets.tdb, no kinit / keytab /
+# password file needed.
+fetch_one_file() {
+    local fqdn="$1" remote="$2" out="$3"
+    smbclient "//${fqdn}/sysvol" -P --quiet \
+        -c "get \"$remote\" \"$out\"" >/dev/null 2>&1
+}
+
+# Settled GPT version on a peer for a given GUID. Echoes -1 on any error.
+# Probes both common GPT.INI casings (the SMB server normalizes case, but
+# we don't know which spelling the file was actually written under until we
+# ask — and `get GPT.INI` will only succeed for the actual stored name).
+fetch_remote_gpt_version() {
+    local fqdn="$1" guid="$2" tmp
+    tmp=$(mktemp /tmp/gpt-probe-XXXXXX.ini)
+    local got=0
+    for fname in GPT.INI gpt.ini Gpt.ini; do
+        if fetch_one_file "$fqdn" "$REALM_LC/Policies/$guid/$fname" "$tmp"; then
+            got=1
+            break
+        fi
+    done
+    if [[ $got -eq 1 ]]; then
+        parse_gpt_ini_version "$tmp"
+    else
+        echo "-1"
+    fi
+    rm -f "$tmp"
+}
+
+# TCP probe with a short timeout. /dev/tcp on bash is enough; we don't need nc.
+probe_reachable() {
+    timeout 2 bash -c "exec 9<>/dev/tcp/$1/445" >/dev/null 2>&1
+}
+
+# --- enumerate GPOs (local SAM, no network needed) ----------------------------
+declare -A target_versions
+while IFS=$'\t' read -r guid ver; do
+    [[ -z "$guid" ]] && continue
+    target_versions["$guid"]="$ver"
+done < <(
+    ldb -b "CN=Policies,CN=System,${BASE_DN}" \
+        "(objectClass=groupPolicyContainer)" cn versionNumber \
+    | awk '
+        function reset() { cn=""; ver="" }
+        BEGIN { reset() }
+        /^[Dd][Nn]:/ { reset(); next }
+        /^[^:]+:[[:space:]]/ {
+            ix = index($0, ":")
+            attr = tolower(substr($0, 1, ix - 1))
+            val  = substr($0, ix + 2)
+            if      (attr == "cn")            cn  = val
+            else if (attr == "versionnumber") ver = val
+            next
+        }
+        /^$/ {
+            if (cn != "" && ver != "") printf "%s\t%s\n", cn, ver
+            reset()
+        }
+        END { if (cn != "" && ver != "") printf "%s\t%s\n", cn, ver }
+    '
+)
+
+# --- --status mode: print freshness table, no remote network calls -----------
+if [[ "$MODE" == "--status" ]]; then
+    printf '\n%-40s %10s %10s %s\n' "GPO GUID" "local" "AD" "status"
+    printf -- '-%.0s' {1..78}; printf '\n'
+    for guid in "${!target_versions[@]}"; do
+        target_ver="${target_versions[$guid]}"
+        local_ver=$(read_local_gpt_version "/var/lib/samba/sysvol/$REALM_LC/Policies/$guid")
+        if [[ "$local_ver" -ge "$target_ver" ]]; then
+            status="current"
+        elif [[ "$local_ver" -eq 0 ]]; then
+            status="MISSING"
+        else
+            status="STALE (-$((target_ver - local_ver)))"
+        fi
+        printf '%-40s %10s %10s %s\n' "$guid" "$local_ver" "$target_ver" "$status"
+    done
+    # Orphan section (local dirs with no AD object).
+    if [[ -d "/var/lib/samba/sysvol/$REALM_LC/Policies" ]]; then
+        for d in "/var/lib/samba/sysvol/$REALM_LC/Policies/"*/; do
+            [[ -d "$d" ]] || continue
+            bn=$(basename "$d")
+            [[ "$bn" =~ ^\{.*\}$ ]] || continue
+            [[ -z "${target_versions[$bn]+set}" ]] || continue
+            printf '%-40s %10s %10s %s\n' "$bn" "?" "?" "ORPHAN"
+        done
+    fi
     exit 0
 fi
 
-: "${SYNC_TRANSPORT:=ssh}"
-: "${REMOTE_DC:?REMOTE_DC not set in $CONF}"
-
-log "start: transport=${SYNC_TRANSPORT} remote=${REMOTE_DC}"
-
-case "$SYNC_TRANSPORT" in
-    ssh)
-        : "${SYNC_ROLE:=pull}"
-        : "${REMOTE_USER:?REMOTE_USER not set in $CONF}"
-        : "${SSH_KEY:?SSH_KEY not set in $CONF}"
-        [[ -f "$SSH_KEY" ]] || fatal "SSH key $SSH_KEY does not exist; re-run samba-sconfig"
-
-        ssh_cmd="ssh -i $SSH_KEY -o StrictHostKeyChecking=no -o BatchMode=yes"
-        case "$SYNC_ROLE" in
-            pull)
-                if rsync -avz --delete --max-delete=100 \
-                        -e "$ssh_cmd" \
-                        "${REMOTE_USER}@${REMOTE_DC}:/var/lib/samba/sysvol/" \
-                        "/var/lib/samba/sysvol/" \
-                        --exclude='*.tmp' >> "$LOGFILE" 2>&1; then
-                    log "rsync pull OK"
-                else
-                    log "WARN: rsync pull returned $? (partial or transient failure)"
-                fi
-                ;;
-            push)
-                if rsync -avz --delete --max-delete=100 \
-                        -e "$ssh_cmd" \
-                        "/var/lib/samba/sysvol/" \
-                        "${REMOTE_USER}@${REMOTE_DC}:/var/lib/samba/sysvol/" \
-                        --exclude='*.tmp' >> "$LOGFILE" 2>&1; then
-                    log "rsync push OK"
-                else
-                    log "WARN: rsync push returned $? (partial or transient failure)"
-                fi
-                ;;
-            *) fatal "unknown SYNC_ROLE '$SYNC_ROLE' (expected: pull|push)" ;;
+# --- discover candidate peers (sync mode only) --------------------------------
+candidates_raw=()
+while IFS=$'\t' read -r tier fqdn; do
+    [[ -z "$fqdn" ]] && continue
+    candidates_raw+=("${tier}|${fqdn}")
+done < <(
+    ldb -b "CN=Sites,CN=Configuration,${BASE_DN}" \
+        "(objectClass=server)" cn dnsHostName serverReference \
+    | awk -v self="$NETBIOS_SELF" '
+        # LDAP attribute names are case-insensitive; ldbsearch echoes them
+        # in whatever case the schema declared. Normalize the attribute name
+        # to lower case for matching, then take the value verbatim.
+        function reset() { cn=""; fqdn=""; ref="" }
+        BEGIN { reset() }
+        /^[Dd][Nn]:/ { reset(); next }
+        /^[^:]+:[[:space:]]/ {
+            ix = index($0, ":")
+            attr = tolower(substr($0, 1, ix - 1))
+            val  = substr($0, ix + 2)
+            if      (attr == "cn")              cn   = val
+            else if (attr == "dnshostname")     fqdn = val
+            else if (attr == "serverreference") ref  = val
+            next
+        }
+        /^$/ {
+            if (cn != "" && fqdn != "" && toupper(cn) != self)
+                printf "%s\t%s\t%s\n", cn, fqdn, ref
+            reset()
+        }
+        END {
+            if (cn != "" && fqdn != "" && toupper(cn) != self)
+                printf "%s\t%s\t%s\n", cn, fqdn, ref
+        }
+    ' \
+    | while IFS=$'\t' read -r cn fqdn ref; do
+        os=$(ldb -b "$ref" "(objectClass=computer)" operatingSystem \
+              | awk 'BEGIN{IGNORECASE=1}
+                     /^operatingSystem:[[:space:]]/ {
+                         ix = index($0, ":")
+                         val = substr($0, ix + 2)
+                         sub(/\r$/, "", val)
+                         print val; exit
+                     }')
+        case "$os" in
+            *Samba*)   tier=2 ;;
+            *Windows*) tier=1 ;;
+            *)         tier=3 ;;
         esac
-        ;;
+        skip=0
+        for excl in $EXCLUDE_DCS; do
+            [[ "${fqdn,,}" == "${excl,,}" ]] && skip=1
+        done
+        [[ $skip -eq 1 ]] && continue
+        for pref in $PREFERRED_DCS; do
+            [[ "${fqdn,,}" == "${pref,,}" ]] && tier=0
+        done
+        printf '%d\t%s\n' "$tier" "$fqdn"
+    done \
+    | sort -k1,1n -k2,2
+)
 
-    smb)
-        : "${SMB_CRED_FILE:?SMB_CRED_FILE not set in $CONF}"
-        [[ -f "$SMB_CRED_FILE" ]] || fatal "credentials file $SMB_CRED_FILE is missing"
+candidates=()
+for entry in "${candidates_raw[@]}"; do
+    tier="${entry%%|*}"
+    fqdn="${entry#*|}"
+    if probe_reachable "$fqdn"; then
+        candidates+=("${tier}|${fqdn}")
+        say "candidate: tier=$tier $fqdn (reachable)"
+    else
+        say "candidate: tier=$tier $fqdn (unreachable, skipped)"
+    fi
+done
 
-        realm_lower=$(awk -F= '
-            /^[[:space:]]*realm[[:space:]]*=/ {
-                sub(/^[[:space:]]+/, "", $2); sub(/[[:space:]]+$/, "", $2)
-                print tolower($2); exit
-            }' /etc/samba/smb.conf)
-        [[ -n "$realm_lower" ]] || fatal "could not determine realm from /etc/samba/smb.conf"
-
-        tmpdir=$(mktemp -d)
-        trap 'rm -rf "$tmpdir"' EXIT
-
-        # mget preserves file content; NTACLs are NOT carried over SMB in a
-        # form Samba's on-disk xattrs can consume. sysvolreset below rebuilds
-        # them from AD, so that's the source of truth.
-        if smbclient "//${REMOTE_DC}/sysvol" -A "$SMB_CRED_FILE" \
-                -c "recurse ON; prompt OFF; lcd ${tmpdir}; mget ${realm_lower}" \
-                >> "$LOGFILE" 2>&1; then
-
-            if [[ -d "${tmpdir}/${realm_lower}" ]]; then
-                mkdir -p "/var/lib/samba/sysvol/${realm_lower}"
-                if rsync -a --delete --max-delete=100 \
-                        "${tmpdir}/${realm_lower}/" \
-                        "/var/lib/samba/sysvol/${realm_lower}/" \
-                        >> "$LOGFILE" 2>&1; then
-                    log "smb pull OK from //${REMOTE_DC}/sysvol/${realm_lower}"
-                else
-                    log "WARN: local rsync returned $? after smb pull"
-                fi
-            else
-                fatal "smbclient mget produced no ${realm_lower}/ under ${tmpdir}"
-            fi
-        else
-            fatal "smbclient pull from //${REMOTE_DC}/sysvol failed"
-        fi
-        ;;
-
-    *) fatal "unknown SYNC_TRANSPORT '$SYNC_TRANSPORT' (expected: ssh|smb)" ;;
-esac
-
-# Always re-derive NTACLs from AD so foreign SIDs / renamed principals in
-# copied GPOs resolve correctly. This is the same call samba-sconfig's
-# "Reset SYSVOL ACLs" menu item makes.
-if ! samba-tool ntacl sysvolreset >> "$LOGFILE" 2>&1; then
-    log "WARN: samba-tool ntacl sysvolreset failed"
+if [[ ${#candidates[@]} -eq 0 ]]; then
+    say "no DCs reachable; nothing to do"
+    exit 0
 fi
 
-log "sync completed"
+# --- pull loop ----------------------------------------------------------------
+new_count=0
+update_count=0
+delete_count=0
+skip_count=0
+no_source_count=0
+any_pulled=0
+
+# Orphan cleanup: local GPO dirs with no matching AD object.
+if [[ -d "/var/lib/samba/sysvol/$REALM_LC/Policies" ]]; then
+    for d in "/var/lib/samba/sysvol/$REALM_LC/Policies/"*/; do
+        [[ -d "$d" ]] || continue
+        bn=$(basename "$d")
+        [[ "$bn" =~ ^\{.*\}$ ]] || continue
+        if [[ -z "${target_versions[$bn]+set}" ]]; then
+            say "delete orphan: $bn (no AD object)"
+            rm -rf "$d"
+            delete_count=$((delete_count + 1))
+            any_pulled=1
+        fi
+    done
+fi
+
+for guid in "${!target_versions[@]}"; do
+    target_ver="${target_versions[$guid]}"
+    local_ver=$(read_local_gpt_version "/var/lib/samba/sysvol/$REALM_LC/Policies/$guid")
+
+    if [[ "$local_ver" -ge "$target_ver" ]]; then
+        skip_count=$((skip_count + 1))
+        continue
+    fi
+
+    say "GPO $guid: local v$local_ver < target v$target_ver"
+
+    chosen_fqdn=""
+    chosen_ver=""
+    for entry in "${candidates[@]}"; do
+        fqdn="${entry#*|}"
+        remote_gpt=$(fetch_remote_gpt_version "$fqdn" "$guid")
+        # Settled-version gate: any peer that already has GPT version >=
+        # what we want has definitionally finished writing it. DFSR (Windows)
+        # and this script's own stage-then-swap (Samba peers) both update
+        # the GPT.INI Version *after* the on-disk files settle, so seeing
+        # remote_gpt >= target_ver is enough to know the peer's content is
+        # internally consistent. No need to cross-check the peer's LDAP.
+        if [[ "$remote_gpt" -lt "$target_ver" ]]; then
+            say "  $fqdn: GPT v$remote_gpt < target v$target_ver, skip"
+            continue
+        fi
+        chosen_fqdn="$fqdn"
+        chosen_ver="$remote_gpt"
+        break
+    done
+
+    if [[ -z "$chosen_fqdn" ]]; then
+        say "GPO $guid: no peer has settled v$target_ver yet"
+        no_source_count=$((no_source_count + 1))
+        continue
+    fi
+
+    # Stage-then-swap: never leave the live tree half-written.
+    # smbclient mget needs to be `cd <parent>; mget <name>` — passing a
+    # path-with-slashes to mget directly produces a silent rc=0 with no
+    # files. Use the `cd` form, which mirrors the directory tree under
+    # $stage/<guid>/, then rsync that into place.
+    stage=$(mktemp -d /tmp/sysvol-stage.XXXXXX)
+    if smbclient "//${chosen_fqdn}/sysvol" -P --quiet \
+            -c "recurse ON; prompt OFF; cd $REALM_LC/Policies; lcd $stage; mget $guid" \
+            >>"$LOGFILE" 2>&1 \
+        && [[ -d "$stage/$guid" ]]; then
+
+        dst="/var/lib/samba/sysvol/$REALM_LC/Policies/$guid"
+        mkdir -p "$dst"
+        if rsync -a --delete --max-delete=100 \
+                "$stage/$guid/" "$dst/" >>"$LOGFILE" 2>&1; then
+            say "GPO $guid: pulled v$local_ver -> v$chosen_ver from $chosen_fqdn"
+            if [[ "$local_ver" -eq 0 ]]; then
+                new_count=$((new_count + 1))
+            else
+                update_count=$((update_count + 1))
+            fi
+            any_pulled=1
+        else
+            say "GPO $guid: local rsync into $dst failed"
+        fi
+    else
+        say "GPO $guid: smbclient mget from $chosen_fqdn failed (no $stage/$guid produced)"
+    fi
+    rm -rf "$stage"
+done
+
+# A single whole-tree sysvolreset at the end is cheaper than per-GPO walks
+# and matches what samba-tool exposes (no per-path scope).
+if [[ $any_pulled -eq 1 ]]; then
+    say "running ntacl sysvolreset"
+    samba-tool ntacl sysvolreset >>"$LOGFILE" 2>&1 \
+        || say "WARN: ntacl sysvolreset failed"
+fi
+
+say "done: new=$new_count updated=$update_count deleted=$delete_count current=$skip_count no-source=$no_source_count"
 SYNCEOF
 chmod +x /usr/local/sbin/sysvol-sync
 

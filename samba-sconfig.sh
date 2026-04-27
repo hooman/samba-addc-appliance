@@ -1122,8 +1122,9 @@ reset_admin_password() {
 #===============================================================================
 # 4. SYSVOL REPLICATION
 #===============================================================================
-SYSVOL_SYNC_KEY="/root/.ssh/sysvol-sync"
-SYSVOL_SYNC_CRED="/etc/samba/sysvol-sync.cred"
+SYSVOL_SYNC_CONF="/etc/samba/sysvol-sync.conf"
+SYSVOL_SYNC_CRON="/etc/cron.d/sysvol-sync"
+SYSVOL_SYNC_OLD_CRED="/etc/samba/sysvol-sync.cred"
 
 menu_sysvol_sync() {
     is_provisioned || { info "Not provisioned."; return; }
@@ -1131,197 +1132,104 @@ menu_sysvol_sync() {
     while true; do
         local choice
         choice=$(whiptail --title "SYSVOL Replication" \
-            --menu "Samba has no DFSR — this menu sets up an out-of-band replacement.\n  ssh: rsync-over-SSH (Samba ↔ Samba; remote DC must run sshd)\n  smb: smbclient pull from //REMOTE/sysvol (works against Windows DCs)" \
+            --menu "Samba has no DFSR. This menu sets up the periodic puller that\nfetches SYSVOL changes from any reachable DC, preferring Windows.\nAuthentication uses this DC's own machine credentials (smbclient -P)." \
             $WT_HEIGHT $WT_WIDTH $WT_MENU_HEIGHT \
             "1" "Configure SYSVOL Sync" \
-            "2" "Generate SSH Key Pair (ssh transport)" \
-            "3" "Dry Run (test sync)" \
-            "4" "Run Sync Now" \
+            "2" "Run Sync Now" \
+            "3" "Show SYSVOL Freshness (per-GPO version table)" \
+            "4" "Show Sync Status" \
             "5" "Reset SYSVOL ACLs" \
-            "6" "Show Sync Status" \
             "B" "Back" \
             3>&1 1>&2 2>&3) || return
 
         case "$choice" in
             1) configure_sysvol_sync ;;
-            2) generate_sync_sshkey ;;
-            3) test_sysvol_sync ;;
-            4) run_sysvol_sync ;;
+            2) run_sysvol_sync ;;
+            3) show_sysvol_freshness ;;
+            4) show_sync_status ;;
             5) reset_sysvol_acls ;;
-            6) show_sync_status ;;
             B|b) return ;;
         esac
     done
 }
 
+# Migrate legacy sysvol-sync.conf written by an older samba-sconfig (the
+# transport=ssh|smb era) to the v2 format. Idempotent. Drops the credentials
+# file (it held a Domain Admin password — no longer needed under machine
+# Kerberos auth) and the SSH key reference (the new sync uses SMB-only).
+_migrate_old_sysvol_conf() {
+    [[ -f "$SYSVOL_SYNC_CONF" ]] || return 0
+    grep -qE '^(SYNC_TRANSPORT|REMOTE_DC|SMB_CRED_FILE|SSH_KEY)=' "$SYSVOL_SYNC_CONF" 2>/dev/null || return 0
+
+    info "Detected legacy sysvol-sync.conf. Migrating to machine-Kerberos format and removing the old credentials file (if present)."
+    if [[ -f "$SYSVOL_SYNC_OLD_CRED" ]]; then
+        shred -u "$SYSVOL_SYNC_OLD_CRED" 2>/dev/null || rm -f "$SYSVOL_SYNC_OLD_CRED"
+    fi
+    rm -f "$SYSVOL_SYNC_CONF"
+}
+
 configure_sysvol_sync() {
-    local transport
-    transport=$(whiptail --title "Sync Transport" \
-        --menu "Choose how to replicate SYSVOL from the remote DC.\n\n  ssh: rsync-over-SSH (Samba ↔ Samba only; remote DC must run sshd)\n  smb: smbclient pull from //REMOTE/sysvol (pull-only; works against Windows DCs)" \
-        15 72 2 \
-        "ssh" "rsync over SSH (requires sshd on remote)" \
-        "smb" "smbclient pull (works against Windows DCs; pull-only)" \
-        3>&1 1>&2 2>&3) || return
+    _migrate_old_sysvol_conf
 
-    local remote_dc interval
-    remote_dc=$(whiptail --inputbox "FQDN or IP of the remote DC:" 10 64 "" 3>&1 1>&2 2>&3) || return
-    [[ -z "$remote_dc" ]] && { info "Remote DC is required."; return; }
-
-    interval=$(whiptail --inputbox "Sync interval (minutes, 1-59):" 10 64 "5" 3>&1 1>&2 2>&3) || return
+    local interval
+    interval=$(whiptail --inputbox \
+        "Sync interval (minutes, 1-59).\n\n15 is a good default: cheap when nothing changed, responsive enough\nfor production GPO edits, low log churn." \
+        13 68 "15" 3>&1 1>&2 2>&3) || return
     [[ "$interval" =~ ^[0-9]+$ ]] || { info "Interval must be a positive integer."; return; }
     (( interval >= 1 && interval <= 59 )) || { info "Interval must be between 1 and 59 minutes."; return; }
 
-    case "$transport" in
-        ssh)
-            local sync_role remote_user
-            sync_role=$(whiptail --title "Sync Role" \
-                --menu "Is this DC the PRIMARY (push) or REPLICA (pull)?" 12 60 2 \
-                "pull" "REPLICA — pull from primary" \
-                "push" "PRIMARY — push to replica" \
-                3>&1 1>&2 2>&3) || return
+    local preferred excluded
+    preferred=$(whiptail --inputbox \
+        "Optional: space-separated FQDNs to try BEFORE the normal Windows-first ranking. Leave blank to use the default tier order (Windows DCs first, Samba peers second)." \
+        13 72 "" 3>&1 1>&2 2>&3) || return
+    excluded=$(whiptail --inputbox \
+        "Optional: space-separated FQDNs that must NEVER be used as a SYSVOL source (e.g. a half-decommissioned DC). Blank = no exclusions." \
+        13 72 "" 3>&1 1>&2 2>&3) || return
 
-            remote_user=$(whiptail --inputbox \
-                "SSH login user on remote DC (needs access to /var/lib/samba/sysvol/):" \
-                11 68 "root" 3>&1 1>&2 2>&3) || return
-            [[ -z "$remote_user" ]] && { info "Remote user is required."; return; }
+    if [[ ! -f /var/lib/samba/private/secrets.tdb ]]; then
+        info "DC not joined / provisioned (no secrets.tdb). Configure aborted."
+        return
+    fi
 
-            # Generate SSH key BEFORE the cron entry is installed, so the
-            # first scheduled run can't fire while the key file is still
-            # missing (the v1 flow left a window where cron.d/sysvol-sync
-            # would log a keyfile error every few minutes until the user
-            # hit menu item 2).
-            if [[ ! -f "$SYSVOL_SYNC_KEY" ]]; then
-                mkdir -p /root/.ssh; chmod 700 /root/.ssh
-                ssh-keygen -t ed25519 -f "$SYSVOL_SYNC_KEY" -N "" \
-                    -C "sysvol-sync@$(hostname -s)" >/dev/null
-            fi
-
-            umask 077
-            cat > /etc/samba/sysvol-sync.conf <<SCEOF
-SYNC_TRANSPORT="ssh"
-SYNC_ROLE="${sync_role}"
-REMOTE_DC="${remote_dc}"
-REMOTE_USER="${remote_user}"
-SSH_KEY="${SYSVOL_SYNC_KEY}"
+    umask 077
+    cat > "$SYSVOL_SYNC_CONF" <<SCEOF
+# sysvol-sync.conf — v2 (multi-source, machine-credentials)
+# Managed by samba-sconfig. Hand-edits survive next configure if format is preserved.
+SYNC_INTERVAL="${interval}"
+PREFERRED_DCS="${preferred}"
+EXCLUDE_DCS="${excluded}"
 SCEOF
-            chmod 640 /etc/samba/sysvol-sync.conf
-            umask 022
+    chmod 640 "$SYSVOL_SYNC_CONF"
+    umask 022
 
-            whiptail --title "SSH public key" --scrolltext --msgbox \
-                "Add this key to ${remote_user}@${remote_dc}'s authorized_keys before the cron timer next fires:\n\n$(cat "${SYSVOL_SYNC_KEY}.pub")" \
-                16 76
-            ;;
-
-        smb)
-            local admin_netbios admin_user admin_pass
-            admin_netbios=$(whiptail --inputbox \
-                "NetBIOS domain for smbclient authentication:" \
-                10 64 "$(get_netbios)" 3>&1 1>&2 2>&3) || return
-            [[ -z "$admin_netbios" ]] && { info "NetBIOS domain is required."; return; }
-
-            admin_user=$(whiptail --inputbox \
-                "Account used to read //${remote_dc}/sysvol (Administrator or any account with read access):" \
-                12 68 "Administrator" 3>&1 1>&2 2>&3) || return
-            [[ -z "$admin_user" ]] && { info "Admin user is required."; return; }
-
-            admin_pass=$(whiptail --passwordbox \
-                "Password for ${admin_netbios}\\\\${admin_user} (existing account — NOT being created):" \
-                10 68 3>&1 1>&2 2>&3) || return
-            [[ -z "$admin_pass" ]] && { info "Password is required."; return; }
-
-            # smbclient -A reads username=/password=/domain= lines. Keep the
-            # file root-only — it contains a domain admin password.
-            umask 077
-            cat > "$SYSVOL_SYNC_CRED" <<CRED
-username = ${admin_user}
-password = ${admin_pass}
-domain = ${admin_netbios}
-CRED
-            chmod 600 "$SYSVOL_SYNC_CRED"
-            chown root:root "$SYSVOL_SYNC_CRED"
-
-            cat > /etc/samba/sysvol-sync.conf <<SCEOF
-SYNC_TRANSPORT="smb"
-SYNC_ROLE="pull"
-REMOTE_DC="${remote_dc}"
-SMB_CRED_FILE="${SYSVOL_SYNC_CRED}"
-SCEOF
-            chmod 640 /etc/samba/sysvol-sync.conf
-            umask 022
-            ;;
-    esac
-
-    # Install the cron job LAST — only now that the key file / credentials
-    # file actually exist. PATH is set explicitly because cron's default
-    # leaves out /usr/local/sbin and some Samba installs put samba-tool there.
-    cat > /etc/cron.d/sysvol-sync <<CRON
+    cat > "$SYSVOL_SYNC_CRON" <<CRON
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 */${interval} * * * * root /usr/local/sbin/sysvol-sync
 CRON
-    chmod 644 /etc/cron.d/sysvol-sync
+    chmod 644 "$SYSVOL_SYNC_CRON"
 
-    info "Configured.\nTransport: ${transport} | Remote: ${remote_dc} | Every ${interval} min\n\nNext: run Dry Run (menu 3) to verify, then Run Sync Now (menu 4)."
-}
-
-generate_sync_sshkey() {
-    [[ -f "$SYSVOL_SYNC_KEY" ]] && ! yesno "Key exists. Overwrite?" && return
-
-    mkdir -p /root/.ssh; chmod 700 /root/.ssh
-    ssh-keygen -t ed25519 -f "$SYSVOL_SYNC_KEY" -N "" -C "sysvol-sync@$(hostname -s)"
-
-    whiptail --title "Public Key" --scrolltext --msgbox \
-        "Copy to remote DC's authorized_keys:\n\n$(cat "${SYSVOL_SYNC_KEY}.pub")" 14 76
-}
-
-test_sysvol_sync() {
-    [[ -f /etc/samba/sysvol-sync.conf ]] || { info "Not configured."; return; }
-    # shellcheck disable=SC1091
-    source /etc/samba/sysvol-sync.conf
-    whiptail --infobox "Dry run..." 6 40
-    local output
-    case "${SYNC_TRANSPORT:-ssh}" in
-        ssh)
-            [[ -f "${SSH_KEY:-}" ]] || { info "SSH key '${SSH_KEY:-}' missing. Generate it (menu 2) or re-run configure."; return; }
-            case "${SYNC_ROLE:-pull}" in
-                pull) output=$(rsync -avzn --delete --max-delete=100 \
-                        -e "ssh -i ${SSH_KEY} -o StrictHostKeyChecking=no -o BatchMode=yes" \
-                        "${REMOTE_USER}@${REMOTE_DC}:/var/lib/samba/sysvol/" \
-                        "/var/lib/samba/sysvol/" --exclude='*.tmp' 2>&1) ;;
-                push) output=$(rsync -avzn --delete --max-delete=100 \
-                        -e "ssh -i ${SSH_KEY} -o StrictHostKeyChecking=no -o BatchMode=yes" \
-                        "/var/lib/samba/sysvol/" \
-                        "${REMOTE_USER}@${REMOTE_DC}:/var/lib/samba/sysvol/" --exclude='*.tmp' 2>&1) ;;
-            esac
-            ;;
-        smb)
-            [[ -f "${SMB_CRED_FILE:-}" ]] || { info "Credentials file '${SMB_CRED_FILE:-}' missing. Re-run configure."; return; }
-            local realm_lower
-            realm_lower=$(get_realm | tr '[:upper:]' '[:lower:]')
-            output=$(smbclient "//${REMOTE_DC}/sysvol" -A "$SMB_CRED_FILE" \
-                -c "ls ${realm_lower}\\*" 2>&1)
-            ;;
-        *)
-            info "Unknown SYNC_TRANSPORT '${SYNC_TRANSPORT}'."
-            return
-            ;;
-    esac
-    whiptail --title "Dry Run (${SYNC_TRANSPORT:-ssh})" --scrolltext --msgbox "$output" 20 76
+    info "Configured.\nInterval: ${interval} min | Preferred: ${preferred:-<none>} | Excluded: ${excluded:-<none>}\n\nNext: 'Run Sync Now' (menu 2) to do an immediate cycle, then\n'Show SYSVOL Freshness' (menu 3) to confirm GPOs converged."
 }
 
 run_sysvol_sync() {
-    [[ -f /etc/samba/sysvol-sync.conf ]] || { info "Not configured."; return; }
+    [[ -f "$SYSVOL_SYNC_CONF" ]] || { info "Not configured. Run Configure (menu 1) first."; return; }
     yesno "Run SYSVOL sync now?" || return
     whiptail --infobox "Syncing..." 6 40
-    /usr/local/sbin/sysvol-sync 2>&1
-    info "Done. Log: /var/log/samba/sysvol-sync.log"
+    local output; output=$(/usr/local/sbin/sysvol-sync 2>&1)
+    info "Run complete. Log: /var/log/samba/sysvol-sync.log\n\n$(echo "$output" | tail -8)"
+}
+
+show_sysvol_freshness() {
+    [[ -x /usr/local/sbin/sysvol-sync ]] || { info "sysvol-sync helper missing. Re-run prepare-image.sh."; return; }
+    local output; output=$(/usr/local/sbin/sysvol-sync --status 2>&1)
+    whiptail --title "SYSVOL Freshness" --scrolltext --msgbox "$output" 24 96
 }
 
 reset_sysvol_acls() {
     yesno "Reset SYSVOL ACLs?" || return
     # Older deployments provisioned/joined before the idmap-config fix will
     # loop here forever with "idmap range not specified for domain '*'".
-    # Calling ensure_idmap_config is idempotent and cheap; it guarantees
-    # sysvolreset can make progress regardless of how smb.conf got there.
+    # Calling ensure_idmap_config is idempotent and cheap.
     ensure_idmap_config
     local output; output=$(samba-tool ntacl sysvolreset 2>&1)
     info "ACLs reset.\n${output}"
@@ -1329,20 +1237,18 @@ reset_sysvol_acls() {
 
 show_sync_status() {
     local st="SYSVOL Sync Status\n==================\n\n"
-    if [[ -f /etc/samba/sysvol-sync.conf ]]; then
+    if [[ -f "$SYSVOL_SYNC_CONF" ]]; then
         # shellcheck disable=SC1091
-        source /etc/samba/sysvol-sync.conf
-        st+="Transport: ${SYNC_TRANSPORT:-ssh} | Role: ${SYNC_ROLE:-?} | Remote: ${REMOTE_DC:-?}\n"
-        case "${SYNC_TRANSPORT:-ssh}" in
-            ssh) st+="User: ${REMOTE_USER:-?} | Key: ${SSH_KEY:-?}\n\n" ;;
-            smb) st+="Credentials file: ${SMB_CRED_FILE:-?}\n\n" ;;
-        esac
+        source "$SYSVOL_SYNC_CONF"
+        st+="Interval:   ${SYNC_INTERVAL:-?} min\n"
+        st+="Preferred:  ${PREFERRED_DCS:-<none>}\n"
+        st+="Excluded:   ${EXCLUDE_DCS:-<none>}\n\n"
     else
         st+="Not configured.\n\n"
     fi
-    [[ -f /etc/cron.d/sysvol-sync ]] && st+="Cron:\n$(cat /etc/cron.d/sysvol-sync)\n\n" || st+="Cron: not installed\n\n"
-    [[ -f /var/log/samba/sysvol-sync.log ]] && st+="Last 10 lines:\n$(tail -10 /var/log/samba/sysvol-sync.log)\n" || st+="No sync log yet.\n"
-    whiptail --title "Sync Status" --scrolltext --msgbox "$st" 22 76
+    [[ -f "$SYSVOL_SYNC_CRON" ]] && st+="Cron:\n$(cat "$SYSVOL_SYNC_CRON")\n\n" || st+="Cron: not installed\n\n"
+    [[ -f /var/log/samba/sysvol-sync.log ]] && st+="Last 12 log lines:\n$(tail -12 /var/log/samba/sysvol-sync.log)\n" || st+="No sync log yet.\n"
+    whiptail --title "Sync Status" --scrolltext --msgbox "$st" 24 88
 }
 
 #===============================================================================
