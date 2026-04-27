@@ -172,39 +172,33 @@ Then apply the Microsoft baseline:
 ssh nmadmin@server 'pwsh -File D:\ISO\lab-scripts\Apply-SecurityBaseline.ps1'
 ```
 
-### 5. Create the Samba test VM
+### 5. Build the Samba appliance image
+
+A single command stages a Debian cloud-init seed, creates the Hyper-V VM,
+runs `prepare-image.sh`, and snapshots the result as `golden-image`. No
+attended installer, no console clicks:
 
 ```bash
-ssh nmadmin@server 'pwsh -File D:\ISO\lab-scripts\New-SambaTestVM.ps1 -VMName samba-dc1 -Start'
+lab/build-fresh-base.sh -f       # -f removes any existing samba-dc1 first
 ```
 
-Install Debian manually in the console:
+Under the hood:
 
-- Hostname: `samba-dc1`
-- Network: DHCP
-- Software selection: SSH server and standard system utilities only
-- Create `debadmin`
-- After first boot, give `debadmin` passwordless sudo and install your SSH key
+1. `lab/stage-samba-base.sh` produces `D:\ISO\debian-13-samba-base.vhdx`
+   (one-time Debian generic-cloud → VHDX conversion, ~60 s) plus a
+   per-VM `D:\ISO\samba-dc1-seed.iso` carrying hostname + your SSH key
+   + `debadmin` with passwordless sudo.
+2. `lab/hyperv/New-SambaTestVM.ps1` creates a Gen2 VM with a
+   differencing VHDX rooted on the base, the seed ISO mounted as DVD,
+   MAC pinned to the dnsmasq reservation. Boots, cloud-init applies
+   the seed once, the VM is reachable on `10.10.10.20`.
+3. `prepare-image.sh` runs unattended over SSH (~5 minutes).
+4. The VM shuts down and the host takes a `golden-image` checkpoint.
 
-Verify:
+Verify reachability after the build:
 
 ```bash
 ssh -J nmadmin@server debadmin@10.10.10.20 'sudo -n true && echo OK'
-```
-
-### 6. Prepare and checkpoint the image
-
-Copy the scripts to the VM and run image preparation:
-
-```bash
-scp -J nmadmin@server prepare-image.sh samba-sconfig.sh debadmin@10.10.10.20:/tmp/
-ssh -J nmadmin@server debadmin@10.10.10.20 'sudo install -m 0755 /tmp/samba-sconfig.sh /usr/local/sbin/samba-sconfig && sudo cp /tmp/prepare-image.sh /root/prepare-image.sh && sudo bash /root/prepare-image.sh'
-```
-
-Shut down and checkpoint on the Hyper-V host:
-
-```bash
-ssh nmadmin@server 'Stop-VM samba-dc1; Checkpoint-VM -Name samba-dc1 -SnapshotName golden-image'
 ```
 
 ## Running Tests

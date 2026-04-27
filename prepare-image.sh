@@ -34,6 +34,18 @@ fi
 export DEBIAN_FRONTEND=noninteractive
 
 #===============================================================================
+# 0. REFRESH APT INDEXES
+#===============================================================================
+# Debian cloud images ship with /var/lib/apt/lists/ cleaned to keep the image
+# small. Without an `apt-get update` first, any subsequent `apt-get install`
+# of a package that wasn't in the build-time index — for example the
+# hyperv-daemons install in section 2 — fails with "Unable to locate
+# package". Section 3 also runs apt-get update + upgrade; the redundant
+# update there is a no-op and not worth removing.
+log "Refreshing apt indexes..."
+apt-get update -y
+
+#===============================================================================
 # 1. REMOVE UNNECESSARY PACKAGES
 #===============================================================================
 # This is a special-purpose AD DC appliance: LDAP, Kerberos, SMB, DNS, and

@@ -110,12 +110,13 @@ indicated filenames.
 | Artifact | Default path on Mac | Where to get it |
 | --- | --- | --- |
 | Windows Server 2025 Evaluation ISO | `/Volumes/ISO/*WS*26100*_EVAL*.iso` | [Microsoft Evaluation Center](https://www.microsoft.com/evalcenter/evaluate-windows-server) |
-| Debian 13 (Trixie) netinst ISO | `/Volumes/ISO/debian-13*-amd64-netinst.iso` | [debian.org CD images](https://www.debian.org/CD/netinst/) |
 | MSFT Security Baseline for WS2025 v2602 | `/Volumes/ISO/WS2025-2602-Security-Baseline.zip` | [Microsoft Security Compliance Toolkit](https://learn.microsoft.com/windows/security/threat-protection/security-compliance-toolkit-10) |
 
-The Debian 13 generic cloud image used for the router VM is fetched
-automatically by `stage-router-artifacts.sh` the first time you run it;
-you do not need to download that by hand.
+The Debian 13 generic cloud image used by both the router and the Samba
+appliance is fetched automatically the first time you run
+`stage-router-artifacts.sh` (lab-router) or `lab/stage-samba-base.sh`
+(this repo) — you do not need to download a Debian ISO by hand. The
+manual Debian netinst flow has been retired in favor of cloud-init.
 
 Exact filenames used by default in the scripts (tweak via script
 parameters if you use different names):
@@ -124,8 +125,11 @@ parameters if you use different names):
   `D:\ISO\26100.32230.260111-0550.lt_release_svc_refresh_SERVER_EVAL_x64FRE_en-us.iso`
   (pass `-IsoPath` to override)
 - `lab/hyperv/New-SambaTestVM.ps1` expects
-  `D:\ISO\debian-13.4.0-amd64-netinst.iso` (pass `-DebianIsoPath` to
-  override)
+  `D:\ISO\debian-13-samba-base.vhdx` and
+  `D:\ISO\<VMName>-seed.iso` — both produced by
+  `lab/stage-samba-base.sh` (pass `-BaseVhdxPath` / `-SeedIso` to
+  override). End-to-end builds usually go through
+  `lab/build-fresh-base.sh` instead.
 - `lab/hyperv/Apply-SecurityBaseline.ps1` expects
   `D:\ISO\WS2025-2602-Security-Baseline.zip` (pass `-BaselineZipPath`
   to override)
@@ -200,7 +204,9 @@ touch /Volumes/ISO/.write-test && rm /Volumes/ISO/.write-test && echo "ISO share
 ls /Volumes/ISO/*.iso /Volumes/ISO/WS2025-2602-Security-Baseline.zip
 
 # 8. Syntax check the three repos.
-(cd ../samba-addc-appliance && bash -n prepare-image.sh samba-sconfig.sh lab/run-scenario.sh lab/scenarios/*.sh)
+(cd ../samba-addc-appliance && bash -n prepare-image.sh samba-sconfig.sh \
+    lab/run-scenario.sh lab/stage-samba-base.sh lab/build-fresh-base.sh \
+    lab/scenarios/*.sh)
 (cd ../lab-kit && bash -n bin/run-scenario.sh scenarios/common/*.sh)
 (cd ../lab-router && bash -n scripts/stage-router-artifacts.sh)
 echo "syntax checks OK"
@@ -224,6 +230,18 @@ From then on, the daily loop is:
 lab/run-scenario.sh smoke-prepared-image
 lab/run-scenario.sh join-dc
 ```
+
+When you change `prepare-image.sh` and need a fresh `golden-image`
+checkpoint to run scenarios against, rebuild it end-to-end (no
+attended Debian installer, no console clicks):
+
+```bash
+lab/build-fresh-base.sh -f       # -f removes the existing samba-dc1 first
+```
+
+That stages the cloud image + per-VM seed, creates the VM, waits for
+cloud-init, runs `prepare-image.sh`, shuts down, and snapshots
+`golden-image`. ~6 minutes start to finish, mostly unattended.
 
 See [LAB-TESTING.md](LAB-TESTING.md) for scenario authoring and the
 full test plan.
