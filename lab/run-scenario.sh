@@ -90,4 +90,4 @@ SCENARIO_FILE="$SCRIPT_DIR/scenarios/$SCENARIO.sh"
 # resolve against the expected layout.
 cd "$REPO_DIR"
 
-LAB_ENV="$ENV_FILE" exec "$LAB_KIT_RUNNER" "$SCENARIO_FILE" "${FORWARD[@]}"
+LAB_ENV="$ENV_FILE" exec "$LAB_KIT_RUNNER" "$SCENARIO_FILE" "${FORWARD[@]+"${FORWARD[@]}"}"
