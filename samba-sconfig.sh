@@ -1632,16 +1632,51 @@ cli_join_dc() {
     fi
 }
 
+cli_provision_new() {
+    : "${SC_REALM:?SC_REALM env var required}"
+    : "${SC_NETBIOS:?SC_NETBIOS env var required}"
+    : "${SC_PASS:?SC_PASS env var required (Administrator password to set)}"
+    SC_FWD="${SC_FWD:-1.1.1.1}"
+
+    local DC_REALM="${SC_REALM^^}"
+    local DC_NETBIOS="${SC_NETBIOS^^}"
+    local DC_ADMIN_PASS="$SC_PASS"
+    local DC_DNS_FORWARDER="$SC_FWD"
+
+    echo "[sconfig] provisioning new forest $DC_REALM (NetBIOS=$DC_NETBIOS)..."
+    rm -f /etc/samba/smb.conf
+    systemctl stop samba-ad-dc 2>/dev/null || true
+    write_krb5_conf "$DC_REALM"
+
+    if samba-tool domain provision \
+            --realm="$DC_REALM" --domain="$DC_NETBIOS" \
+            --server-role=dc --dns-backend=SAMBA_INTERNAL \
+            --adminpass="$DC_ADMIN_PASS" \
+            --option="dns forwarder = $DC_DNS_FORWARDER" 2>&1 | tail -10; then
+        apply_hardening_to_smb_conf
+        post_provision_setup "$DC_REALM" "$DC_DNS_FORWARDER"
+        _generate_tls_cert_core
+        echo "[sconfig] PROVISION SUCCESS (realm=$DC_REALM, netbios=$DC_NETBIOS)"
+    else
+        local rc=$?
+        echo "[sconfig] PROVISION FAILED (rc=$rc)" >&2
+        return "$rc"
+    fi
+}
+
 usage_cli() {
     cat <<USAGE
-Usage: samba-sconfig                  # interactive TUI
-       samba-sconfig probe-fl <dc>    # print detected forest FL string
-       samba-sconfig join-dc          # headless join
+Usage: samba-sconfig                       # interactive TUI
+       samba-sconfig probe-fl <dc>         # print detected forest FL string
+       samba-sconfig join-dc               # headless join
            required env: SC_REALM, SC_NETBIOS, SC_DC (FQDN or IP), SC_PASS
            optional env: SC_FWD (default: SC_DC)
                          SC_ROLE=DC|RODC (default: DC)
                          SC_ADMIN (default: Administrator) — any domain
                                   account with join rights
+       samba-sconfig provision-new         # headless new-forest provision
+           required env: SC_REALM, SC_NETBIOS, SC_PASS
+           optional env: SC_FWD (default: 1.1.1.1)
 USAGE
 }
 
@@ -1651,9 +1686,10 @@ USAGE
 check_root
 
 case "${1:-}" in
-    "")           main_menu ;;
-    probe-fl)     shift; cli_probe_fl "$@" ;;
-    join-dc)      cli_join_dc ;;
-    -h|--help)    usage_cli ;;
-    *)            echo "Unknown subcommand: $1" >&2; usage_cli >&2; exit 2 ;;
+    "")             main_menu ;;
+    probe-fl)       shift; cli_probe_fl "$@" ;;
+    join-dc)        cli_join_dc ;;
+    provision-new)  cli_provision_new ;;
+    -h|--help)      usage_cli ;;
+    *)              echo "Unknown subcommand: $1" >&2; usage_cli >&2; exit 2 ;;
 esac
