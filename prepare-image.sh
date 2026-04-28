@@ -1161,7 +1161,299 @@ systemctl daemon-reload
 systemctl enable samba-firstboot.service
 
 #===============================================================================
-# 23. FINAL CLEANUP
+# 23. CONSOLE INITIAL-SETUP WIZARD (TTY1)
+#===============================================================================
+# When the appliance lands somewhere DHCP doesn't work, or the operator
+# doesn't have the SSH key the master was built with, the only access path
+# is the hypervisor's console. samba-init is a whiptail-driven setup wizard
+# that takes over TTY1 (via getty autologin) on every boot until the
+# operator marks setup complete. It can configure static IP, change the
+# default password, paste an SSH authorized_keys entry, and rename the
+# host. After it writes /var/lib/samba-init.done, TTY1 falls back to a
+# normal login prompt on subsequent boots.
+log "Installing samba-init console wizard + TTY1 autologin..."
+
+cat > /usr/local/sbin/samba-init <<'INITEOF'
+#!/usr/bin/env bash
+#
+# samba-init — TTY1-resident console setup wizard. Runs as 'debadmin' via
+# autologin; uses passwordless sudo (preconfigured at master build) for
+# system changes. Loops a whiptail menu until the operator picks
+# "Mark setup complete and proceed to login".
+#
+# State files:
+#   /var/lib/samba-init.done                -> setup acknowledged; wizard
+#                                              skipped on subsequent boots
+#   /var/lib/samba-init-default-password    -> debadmin still has the
+#                                              factory default password;
+#                                              the wizard refuses to mark
+#                                              complete while this exists
+
+set -u
+
+MARKER=/var/lib/samba-init.done
+DEFAULT_PWD_MARKER=/var/lib/samba-init-default-password
+GETTY_DROPIN=/etc/systemd/system/getty@tty1.service.d/samba-init.conf
+SELF_USER=$(id -un)
+
+# If setup is already complete, drop straight to a normal login shell.
+# This is defensive — the systemd drop-in is supposed to be removed when
+# setup completes, so we shouldn't normally hit this branch.
+if [[ -f "$MARKER" ]]; then
+    exec /bin/bash --login
+fi
+
+# Geometry constants.
+WT_HEIGHT=20
+WT_WIDTH=72
+WT_MENU=10
+
+clear
+cat <<BANNER
+================================================================
+  Samba AD DC Appliance — initial setup wizard
+
+  This menu runs at the console on every boot until you pick
+  'Mark setup complete'. SSH continues to work in parallel if
+  the deploy operator's key is in authorized_keys.
+================================================================
+BANNER
+sleep 1
+
+show_status() {
+    {
+        echo "Hostname: $(hostnamectl hostname 2>/dev/null || hostname)"
+        echo
+        echo "Network interfaces:"
+        ip -br addr show | sed 's/^/  /'
+        echo
+        echo "Default route:"
+        ip route show default | sed 's/^/  /'
+        [[ -z "$(ip route show default)" ]] && echo "  (none — no default gateway)"
+        echo
+        echo "DNS resolvers:"
+        grep -E '^nameserver' /etc/resolv.conf 2>/dev/null | sed 's/^/  /' || echo "  (none)"
+        echo
+        echo "Setup state:"
+        echo "  default password active: $([[ -f $DEFAULT_PWD_MARKER ]] && echo yes || echo no)"
+        echo "  samba-firstboot done   : $([[ -f /var/lib/samba-firstboot.done ]] && echo yes || echo no)"
+        echo "  AD DC service          : $(systemctl is-active samba-ad-dc 2>/dev/null || echo not-running)"
+    } > /tmp/samba-init-status.$$
+    whiptail --title "Network & setup status" --scrolltext \
+        --textbox /tmp/samba-init-status.$$ "$WT_HEIGHT" "$WT_WIDTH"
+    rm -f /tmp/samba-init-status.$$
+}
+
+config_network() {
+    local mode
+    mode=$(whiptail --title "Network configuration" \
+        --menu "Pick a mode for eth0.\n\nDHCP works if the deployment network has a DHCP server. Static is the fallback when it doesn't." \
+        15 "$WT_WIDTH" 2 \
+        "dhcp"   "DHCP (default for cloud / lab environments)" \
+        "static" "Static IPv4 (manual configuration)" \
+        3>&1 1>&2 2>&3) || return
+
+    case "$mode" in
+        dhcp)
+            sudo bash -c 'cat > /etc/netplan/60-samba-init.yaml <<NPY
+network:
+  version: 2
+  ethernets:
+    eth0:
+      dhcp4: true
+      dhcp6: false
+NPY
+chmod 600 /etc/netplan/60-samba-init.yaml'
+            ;;
+        static)
+            local ipcidr gateway dns
+            ipcidr=$(whiptail --inputbox "IPv4 address with CIDR (e.g. 10.0.0.20/24):" 10 "$WT_WIDTH" 3>&1 1>&2 2>&3) || return
+            gateway=$(whiptail --inputbox "Default gateway (e.g. 10.0.0.1):" 10 "$WT_WIDTH" 3>&1 1>&2 2>&3) || return
+            dns=$(whiptail --inputbox "DNS server(s), space-separated (e.g. 10.0.0.10 1.1.1.1):" 10 "$WT_WIDTH" "1.1.1.1" 3>&1 1>&2 2>&3) || return
+            local nslist=""
+            for n in $dns; do nslist+="$n, "; done
+            nslist="${nslist%, }"
+            sudo bash -c "cat > /etc/netplan/60-samba-init.yaml <<NPY
+network:
+  version: 2
+  ethernets:
+    eth0:
+      dhcp4: false
+      addresses: [${ipcidr}]
+      routes:
+        - to: default
+          via: ${gateway}
+      nameservers:
+        addresses: [${nslist}]
+NPY
+chmod 600 /etc/netplan/60-samba-init.yaml"
+            ;;
+    esac
+    if sudo netplan apply 2>&1 | tee /tmp/netplan.$$; then
+        whiptail --title "Network applied" --scrolltext --msgbox \
+            "$(cat /tmp/netplan.$$)\n\nResult:\n$(ip -br addr show eth0)" 18 "$WT_WIDTH"
+    else
+        whiptail --msgbox "netplan apply reported errors. See /tmp/netplan.$$ — fix and retry." 10 "$WT_WIDTH"
+    fi
+    rm -f /tmp/netplan.$$
+}
+
+change_password() {
+    local p1 p2
+    p1=$(whiptail --passwordbox "New password for ${SELF_USER} (min 8 chars):" 10 "$WT_WIDTH" 3>&1 1>&2 2>&3) || return
+    [[ ${#p1} -lt 8 ]] && { whiptail --msgbox "Min 8 characters." 8 50; return; }
+    p2=$(whiptail --passwordbox "Confirm password:" 10 "$WT_WIDTH" 3>&1 1>&2 2>&3) || return
+    [[ "$p1" == "$p2" ]] || { whiptail --msgbox "Passwords don't match." 8 50; return; }
+
+    if echo "${SELF_USER}:${p1}" | sudo chpasswd; then
+        sudo rm -f "$DEFAULT_PWD_MARKER"
+        whiptail --msgbox "Password updated for ${SELF_USER}.\n\nThe default-password marker is gone; you can now mark setup complete." 11 "$WT_WIDTH"
+    else
+        whiptail --msgbox "chpasswd failed; password not changed." 8 50
+    fi
+}
+
+add_ssh_key() {
+    whiptail --msgbox "Paste the public key below and press OK.\n(Enter the full 'ssh-ed25519 AAA...' line.)" 10 "$WT_WIDTH"
+    local key
+    key=$(whiptail --inputbox "SSH public key:" 11 "$WT_WIDTH" 3>&1 1>&2 2>&3) || return
+    [[ -n "$key" ]] || return
+    case "$key" in
+        ssh-rsa\ *|ssh-ed25519\ *|ecdsa-*\ *|sk-*) ;;
+        *) whiptail --msgbox "That doesn't look like an SSH public key (no algorithm prefix)." 8 70; return ;;
+    esac
+    local home; home=$(getent passwd "$SELF_USER" | cut -d: -f6)
+    sudo install -d -o "$SELF_USER" -g "$SELF_USER" -m 0700 "$home/.ssh"
+    if echo "$key" | sudo tee -a "$home/.ssh/authorized_keys" >/dev/null; then
+        sudo chown "$SELF_USER:$SELF_USER" "$home/.ssh/authorized_keys"
+        sudo chmod 0600 "$home/.ssh/authorized_keys"
+        whiptail --msgbox "Key added. SSH login as ${SELF_USER} will accept it." 9 "$WT_WIDTH"
+    else
+        whiptail --msgbox "Failed to write authorized_keys." 8 50
+    fi
+}
+
+set_hostname() {
+    local cur new
+    cur=$(hostnamectl hostname 2>/dev/null || hostname)
+    new=$(whiptail --inputbox "New hostname (short name, no FQDN):" 10 "$WT_WIDTH" "$cur" 3>&1 1>&2 2>&3) || return
+    [[ -n "$new" ]] || return
+    [[ "$new" =~ ^[a-zA-Z][a-zA-Z0-9-]{0,14}$ ]] || {
+        whiptail --msgbox "Hostname must start with a letter, only [a-zA-Z0-9-], 1-15 chars (NetBIOS limit)." 9 "$WT_WIDTH"
+        return
+    }
+    sudo hostnamectl set-hostname "$new"
+    sudo sed -i "s/\\b${cur}\\b/${new}/g" /etc/hosts
+    whiptail --msgbox "Hostname is now ${new}. Reboot recommended after marking setup complete." 9 "$WT_WIDTH"
+}
+
+show_firstboot_log() {
+    if [[ -f /var/log/samba-firstboot.log ]]; then
+        whiptail --title "/var/log/samba-firstboot.log" --scrolltext \
+            --textbox /var/log/samba-firstboot.log "$WT_HEIGHT" "$WT_WIDTH"
+    else
+        whiptail --msgbox "No samba-firstboot log yet (firstboot may not have run)." 8 60
+    fi
+}
+
+mark_done() {
+    if [[ -f "$DEFAULT_PWD_MARKER" ]]; then
+        whiptail --msgbox "Change the ${SELF_USER} password (option 3) before marking setup complete.\n\nThe default password is documented and trivially findable." 11 "$WT_WIDTH"
+        return
+    fi
+    whiptail --yesno "Mark initial setup complete?\n\n  - This wizard will not run on subsequent boots.\n  - The next reboot of this VM gives you a normal login prompt.\n  - You can re-arm by removing $MARKER and reinstalling the\n    getty drop-in at $GETTY_DROPIN." 15 "$WT_WIDTH" || return
+
+    sudo touch "$MARKER"
+    if [[ -f "$GETTY_DROPIN" ]]; then
+        sudo rm -f "$GETTY_DROPIN"
+        sudo systemctl daemon-reload
+    fi
+    whiptail --msgbox "Setup marked complete.\n\nReboot or run 'sudo systemctl restart getty@tty1.service' to drop the autologin and pick up the normal login prompt." 13 "$WT_WIDTH"
+    exit 0
+}
+
+while true; do
+    choice=$(whiptail --title "samba-init — initial setup" --nocancel \
+        --menu "Pick a step. Default password is active; change it (#3) before marking setup complete." \
+        "$WT_HEIGHT" "$WT_WIDTH" "$WT_MENU" \
+        "1" "Show network & setup status" \
+        "2" "Configure network (DHCP / static)" \
+        "3" "Change ${SELF_USER} password" \
+        "4" "Add an SSH authorized_keys entry" \
+        "5" "Set hostname" \
+        "6" "Show samba-firstboot log" \
+        "S" "Drop to a root shell (advanced)" \
+        "D" "Mark setup complete and proceed to login" \
+        3>&1 1>&2 2>&3)
+    case "$choice" in
+        1) show_status ;;
+        2) config_network ;;
+        3) change_password ;;
+        4) add_ssh_key ;;
+        5) set_hostname ;;
+        6) show_firstboot_log ;;
+        S|s) clear; sudo bash; ;;
+        D|d) mark_done ;;
+    esac
+done
+INITEOF
+chmod +x /usr/local/sbin/samba-init
+
+# TTY1 autologin override. agetty will spawn a debadmin shell without
+# password; debadmin's .profile launches the wizard. After the wizard
+# acknowledges setup, this drop-in is removed and TTY1 falls back to the
+# stock getty. The same content is also kept under /usr/local/sbin/ so
+# RELEASE.md's "re-arm the wizard" recipe is a simple cp.
+mkdir -p /etc/systemd/system/getty@tty1.service.d
+cat > /usr/local/sbin/samba-init.getty-dropin <<'GETTYEOF'
+[Service]
+ExecStart=
+ExecStart=-/sbin/agetty --autologin debadmin --noclear --keep-baud %I 115200,38400,9600 $TERM
+Type=idle
+GETTYEOF
+cp /usr/local/sbin/samba-init.getty-dropin \
+   /etc/systemd/system/getty@tty1.service.d/samba-init.conf
+
+# debadmin's profile launches the wizard on TTY1. SSH sessions don't run
+# the wizard because $(tty) returns /dev/pts/N for SSH; only TTY1 hits it.
+mkdir -p /home/debadmin
+cat > /home/debadmin/.profile <<'PROFILEEOF'
+# Auto-launch samba-init on TTY1 only, while initial setup is pending.
+# SSH and other TTYs fall through to a normal shell.
+if [[ -t 0 ]] && [[ "$(tty)" == "/dev/tty1" ]] && [[ ! -f /var/lib/samba-init.done ]]; then
+    exec /usr/local/sbin/samba-init
+fi
+PROFILEEOF
+chown debadmin:debadmin /home/debadmin/.profile 2>/dev/null || true
+
+#===============================================================================
+# 24. NETWORK-AWARE LOGIN BANNER (MOTD)
+#===============================================================================
+# Standard Debian pam_motd runs every executable under /etc/update-motd.d/
+# at login and concatenates their stdout. This snippet shows the deployed
+# operator the basics they're going to want at first contact: where the
+# host is on the network, what state the appliance is in, and what to
+# run next.
+log "Installing samba-net-status MOTD generator..."
+cat > /etc/update-motd.d/15-samba-net-status <<'MOTDEOF'
+#!/bin/sh
+printf '\n  Samba AD DC Appliance\n'
+printf '  ---------------------\n'
+printf '  Hostname:  %s\n' "$(hostnamectl hostname 2>/dev/null || hostname)"
+printf '  Network:\n'
+ip -br addr show 2>/dev/null | awk 'NF>0 && $1!="lo" {printf "    %s\n", $0}'
+gw=$(ip route show default 2>/dev/null | awk '/default/ {print $3" via "$5; exit}')
+[ -n "$gw" ] && printf '  Default route: %s\n' "$gw" || printf '  Default route: (none)\n'
+dns=$(awk '/^nameserver/ {printf "%s ", $2}' /etc/resolv.conf 2>/dev/null)
+[ -n "$dns" ] && printf '  DNS:        %s\n' "$dns"
+printf '  Setup wizard: %s\n' "$([ -f /var/lib/samba-init.done ] && echo done || echo PENDING — open the console for the wizard)"
+printf '  AD DC svc:  %s\n' "$(systemctl is-active samba-ad-dc 2>/dev/null || echo not-running — run sudo samba-sconfig)"
+printf '\n'
+MOTDEOF
+chmod +x /etc/update-motd.d/15-samba-net-status
+
+#===============================================================================
+# 25. FINAL CLEANUP
 #===============================================================================
 log "Final cleanup..."
 apt-get autoremove -y --purge

@@ -257,36 +257,90 @@ enable samba-firstboot.service && reboot`.
 
 ## Logging in
 
-The deploy-master image was prepared by a build operator whose
-`~/.ssh/id_ed25519.pub` was baked into the cloud-init seed at build
-time. The user account on the deployed VM is **`debadmin`** with
-**passwordless sudo**, **SSH-key auth only** (`ssh_pwauth: false`,
-`disable_root: true`).
+The deployed appliance gives you **three** independent ways in. You only
+need one of them to work:
 
-This means: you log in via the **same SSH key the operator used to build
-the image**. Out-of-band coordination is required:
+1. **SSH with the build operator's key.** The deploy-master was prepared
+   by an operator whose `~/.ssh/id_ed25519.pub` was baked into the
+   cloud-init seed at build time. SSH login as `debadmin` with that key
+   has worked since first boot. Coordinate out-of-band: get the operator
+   to confirm the key fingerprint, or have them rebuild with your key
+   (`lab/stage-samba-base.sh -k yourkey.pub`).
 
-- Get the public-key fingerprint from the build operator and confirm it
-  matches a key you control.
-- Or have the operator regenerate the master with your public key as the
-  staging input (`STAGE`-time, `lab/stage-samba-base.sh -k yourkey.pub`).
+2. **Console password.** `debadmin` ships with a documented default
+   password — **`samba-appliance-please-change-me`** — that works only
+   at the hypervisor's console. Over SSH, password auth is disabled
+   (`ssh_pwauth: false`). The TTY1 wizard (next section) forces you to
+   change this password before you can mark setup complete, so the
+   default is a strictly time-limited credential.
 
-### Recovery if the SSH key is lost
+3. **TTY1 console wizard.** Open the hypervisor's console on a freshly
+   deployed VM and you land directly in `samba-init`, a whiptail-driven
+   setup wizard. From there you can configure the network (DHCP or
+   static), change the password, paste your own SSH public key, set the
+   hostname, and view the `samba-firstboot` log — all without any
+   network connectivity. This is the path to use when DHCP didn't work
+   on the deployment network and SSH therefore can't reach the VM.
 
-The image has no console password and no other login path. To recover:
+### The TTY1 setup wizard
+
+`samba-init` runs on `/dev/tty1` via a `getty@tty1.service` autologin
+override on every boot until **`/var/lib/samba-init.done`** exists. Once
+the wizard's "Mark setup complete" option is picked, the override is
+removed and TTY1 falls back to the standard login prompt.
+
+Wizard menu:
+
+| # | Action | Notes |
+|---|---|---|
+| 1 | Show network & setup status | Hostname, all NIC IPs, default route, DNS, AD-DC service state — pure read-only |
+| 2 | Configure network | DHCP or static; writes `/etc/netplan/60-samba-init.yaml` and runs `netplan apply` |
+| 3 | Change debadmin password | Required before "Mark setup complete" succeeds |
+| 4 | Add an SSH authorized_keys entry | Paste a pubkey; appended to `~debadmin/.ssh/authorized_keys` |
+| 5 | Set hostname | NetBIOS-compatible (1-15 chars, starts with a letter) |
+| 6 | Show samba-firstboot log | Diagnostics from the host-tailoring step |
+| S | Drop to a root shell | Escape hatch for when the wizard isn't enough |
+| D | Mark setup complete and proceed to login | Refused while default password is still active |
+
+To re-arm the wizard after marking it done (for example, to re-test the
+flow on a re-imaged VM), reverse the marker:
+
+```bash
+sudo rm /var/lib/samba-init.done
+sudo cp /usr/local/sbin/samba-init.getty-dropin \
+        /etc/systemd/system/getty@tty1.service.d/samba-init.conf
+sudo systemctl daemon-reload && sudo reboot
+```
+
+(The drop-in template lives next to the wizard for exactly this purpose.)
+
+### The login banner (MOTD)
+
+On every login (SSH or post-wizard console) `/etc/update-motd.d/15-samba-net-status`
+prints a short status block: hostname, every NIC's address, default
+gateway, DNS resolvers, whether the wizard is still pending, and whether
+`samba-ad-dc` is running. This is the boot-time "what's wrong, why can't
+I reach this thing" diagnostic. Removing the file silences the banner.
+
+### Recovery if all three login paths fail
+
+Extremely rare (operator's key was lost, default password was changed
+to something forgotten, AND the wizard was already marked complete). To
+recover:
 
 1. Boot the VM into a Linux rescue ISO (or attach the disk to another
    Linux VM as a secondary disk).
 2. Mount the root partition.
-3. Edit `/etc/passwd` to give `debadmin` a shell, or chroot in and
-   `passwd debadmin`, or write a new pubkey to
-   `/home/debadmin/.ssh/authorized_keys`.
+3. Either reset the password (`chroot` and `passwd debadmin`), or write
+   a new pubkey to `/home/debadmin/.ssh/authorized_keys`, or delete
+   `/var/lib/samba-init.done` and reinstall the getty drop-in to
+   re-arm the wizard.
 4. Detach the disk, boot normally.
 
 For cloud platforms with IMDS (AWS, Azure), `samba-firstboot` installs
-`cloud-init` which then accepts SSH-key injection via the platform's
-metadata service on subsequent boots — that's typically the cleanest
-recovery path on those targets.
+`cloud-init` which accepts SSH-key injection via the platform's
+metadata service on subsequent boots — typically the cleanest recovery
+path on those targets.
 
 ## Provisioning the deployed DC
 

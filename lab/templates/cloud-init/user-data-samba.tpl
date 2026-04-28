@@ -31,6 +31,13 @@ runcmd:
   # entirely later if desired; the rendered network config in
   # /etc/netplan/50-cloud-init.yaml persists either way.
   - touch /etc/cloud/cloud-init.disabled
+  # Set a documented default password for @@USERNAME@@. ssh_pwauth: false above
+  # means this password only works at the console; SSH stays key-only. The
+  # samba-init wizard on TTY1 forces the operator to change it before they
+  # can mark setup complete. The marker /var/lib/samba-init-default-password
+  # tells the wizard the password is still the factory default.
+  - 'echo "@@USERNAME@@:samba-appliance-please-change-me" | chpasswd'
+  - 'mkdir -p /var/lib && touch /var/lib/samba-init-default-password'
   # Marker for the orchestrator (lab/build-fresh-base.sh) to poll.
   - 'echo "samba-base-ready: $(date --iso-8601=seconds)" > /var/log/samba-base-ready.marker'
 
