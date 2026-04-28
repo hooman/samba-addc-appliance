@@ -110,35 +110,66 @@ apt-get clean
 log "Package cleanup complete."
 
 #===============================================================================
-# 2. DETECT HYPERVISOR AND INSTALL GUEST AGENT
+# 2. PRE-DOWNLOAD GUEST AGENTS (no install)
 #===============================================================================
-log "Detecting virtualization environment..."
+# This image is host-agnostic: the same prepared snapshot must work on Hyper-V,
+# KVM/QEMU, or VMware regardless of where it was mastered. Detecting the
+# hypervisor here and installing only the matching agent would lock the image
+# to that environment.
+#
+# Instead, pre-download a self-contained .deb bundle for each supported
+# hypervisor into /var/cache/samba-appliance/vmtools/<pkg>/. At the deployed
+# VM's first boot, samba-firstboot.service detects the actual hypervisor and
+# does an offline `dpkg -i` from the matching cache directory, then deletes
+# the rest. This works even if the deployment-side NIC isn't yet recognized,
+# because no internet access is required at first boot.
+#
+# Manifest: /var/cache/samba-appliance/vmtools/manifest maps systemd-detect-virt
+# return values to package names. Single source of truth for the firstboot
+# script.
+log "Pre-downloading guest agents for all supported hypervisors..."
 
-VIRT_TYPE=$(systemd-detect-virt 2>/dev/null || echo "none")
-log "  Detected: ${VIRT_TYPE}"
+VMTOOLS_CACHE="/var/cache/samba-appliance/vmtools"
+mkdir -p "$VMTOOLS_CACHE"
 
-case "$VIRT_TYPE" in
-    kvm|qemu)
-        log "  Installing qemu-guest-agent..."
-        apt-get install -y qemu-guest-agent
-        systemctl enable qemu-guest-agent
-        ;;
-    vmware)
-        log "  Installing open-vm-tools..."
-        apt-get install -y open-vm-tools
-        systemctl enable open-vm-tools
-        ;;
-    microsoft)
-        log "  Installing Hyper-V guest daemons..."
-        apt-get install -y hyperv-daemons
-        ;;
-    oracle)
-        log "  VirtualBox detected. Install Guest Additions manually if needed."
-        ;;
-    none|*)
-        warn "  No recognized hypervisor (bare metal or unknown). Skipping guest agent."
-        ;;
-esac
+# virt-type -> package name. Multiple keys can map to the same package
+# (kvm and qemu both want qemu-guest-agent), so we dedupe before downloading.
+declare -A VM_PKGS=(
+    ["kvm"]="qemu-guest-agent"
+    ["qemu"]="qemu-guest-agent"
+    ["vmware"]="open-vm-tools"
+    ["microsoft"]="hyperv-daemons"
+)
+
+declare -A DOWNLOADED=()
+for virt in "${!VM_PKGS[@]}"; do
+    pkg="${VM_PKGS[$virt]}"
+    [[ -n "${DOWNLOADED[$pkg]:-}" ]] && continue
+    dest="$VMTOOLS_CACHE/$pkg"
+    mkdir -p "$dest/partial"
+    log "  pre-download $pkg -> $dest"
+    # --download-only puts .debs in Dir::Cache::archives without installing.
+    # apt only fetches deps that aren't already satisfied on the prepared
+    # image; deps already on disk stay (and dpkg -i at firstboot is a no-op
+    # for those). --no-install-recommends keeps the bundle small.
+    apt-get install -y --download-only --no-install-recommends \
+        -o "Dir::Cache::archives=$dest" \
+        "$pkg" 2>&1 | tail -3
+    rm -rf "$dest/partial"
+    DOWNLOADED[$pkg]=1
+done
+
+# Manifest in a stable format the firstboot script can grep.
+{
+    echo "# samba-appliance guest-agent manifest"
+    echo "# format: systemd-detect-virt-value=package-name"
+    for virt in "${!VM_PKGS[@]}"; do
+        printf '%s=%s\n' "$virt" "${VM_PKGS[$virt]}"
+    done | sort
+} > "$VMTOOLS_CACHE/manifest"
+
+log "  staged guest-agent cache:"
+du -sh "$VMTOOLS_CACHE"/* 2>/dev/null | sed 's|^|    |'
 
 #===============================================================================
 # 3. SYSTEM UPDATE
@@ -813,7 +844,208 @@ SYNCEOF
 chmod +x /usr/local/sbin/sysvol-sync
 
 #===============================================================================
-# 22. FINAL CLEANUP
+# 22. FIRST-BOOT HOST INTEGRATION
+#===============================================================================
+# samba-firstboot detects which hypervisor we're running on AT FIRST BOOT
+# (not at image-prep time), installs the matching guest agent offline from
+# /var/cache/samba-appliance/vmtools/, prints host-specific recommendations,
+# and disables itself. The marker file /var/lib/samba-firstboot.done makes
+# subsequent boots a no-op.
+log "Installing samba-firstboot helper + service..."
+
+cat > /usr/local/sbin/samba-firstboot <<'FBEOF'
+#!/usr/bin/env bash
+#
+# samba-firstboot — runs once on the first boot of a deployed Samba AD DC
+# appliance. Detects the actual hypervisor (which is usually NOT the same as
+# the one the image was mastered on), installs the matching guest agent from
+# /var/cache/samba-appliance/vmtools/ offline, deletes the unused caches,
+# prints recommended VM hardware, and disables itself.
+
+set -u -o pipefail
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+LOGFILE="/var/log/samba-firstboot.log"
+MARKER="/var/lib/samba-firstboot.done"
+MOTD="/etc/motd.d/01-samba-firstboot"
+CACHE="/var/cache/samba-appliance/vmtools"
+MANIFEST="$CACHE/manifest"
+
+mkdir -p /var/lib /etc/motd.d "$(dirname "$LOGFILE")"
+
+log() { printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" | tee -a "$LOGFILE"; }
+
+if [[ -f "$MARKER" ]]; then
+    log "samba-firstboot already complete (marker present); nothing to do"
+    exit 0
+fi
+
+VIRT=$(systemd-detect-virt 2>/dev/null || echo "none")
+log "host environment: $VIRT"
+
+# Look up the package for this virt-type from the manifest.
+PKG=""
+if [[ -f "$MANIFEST" ]]; then
+    PKG=$(awk -F= -v v="$VIRT" 'NF==2 && $1==v {print $2; exit}' "$MANIFEST")
+fi
+
+INSTALLED_NOTE=""
+if [[ -z "$PKG" ]]; then
+    INSTALLED_NOTE="No guest-agent package staged for '$VIRT'. The DC will run\nwithout host-side integration; chrony handles time, ACPI handles\ngraceful shutdown — both work without an agent. Install one by\nhand if you want the management-plane integration."
+    log "$INSTALLED_NOTE"
+else
+    DEB_DIR="$CACHE/$PKG"
+    if [[ -d "$DEB_DIR" ]] && compgen -G "$DEB_DIR/*.deb" >/dev/null; then
+        log "installing $PKG from $DEB_DIR (offline)"
+        if dpkg -i "$DEB_DIR"/*.deb >>"$LOGFILE" 2>&1; then
+            systemctl daemon-reload || true
+            # Per-pkg services to enable. hyperv-daemons ships three units;
+            # the others bundle a single service named after the package.
+            case "$PKG" in
+                qemu-guest-agent) SVCS="qemu-guest-agent" ;;
+                open-vm-tools)    SVCS="open-vm-tools" ;;
+                # Trixie ships hv-kvp-daemon + hv-vss-daemon as units. The
+                # historical hv-fcopy-daemon was retired upstream — file copy
+                # now happens via the in-kernel hv_fcopy module.
+                hyperv-daemons)   SVCS="hv-kvp-daemon hv-vss-daemon" ;;
+                *)                SVCS="" ;;
+            esac
+            for s in $SVCS; do
+                if systemctl enable --now "$s" >>"$LOGFILE" 2>&1; then
+                    log "  enabled+started: $s"
+                else
+                    log "  WARN: could not start $s (see log)"
+                fi
+            done
+            INSTALLED_NOTE="Guest agent: $PKG (installed)"
+        else
+            INSTALLED_NOTE="ERROR: dpkg -i of $PKG failed; see $LOGFILE"
+            log "$INSTALLED_NOTE"
+        fi
+    else
+        INSTALLED_NOTE="ERROR: $DEB_DIR has no .deb files (cache corrupt?)"
+        log "$INSTALLED_NOTE"
+    fi
+fi
+
+# Host-specific recommendations. Echoed to log AND written to a motd snippet
+# so they show up at every SSH login until an admin removes the file.
+read -r -d '' RECS <<RECEOF || true
+=== Recommended VM hardware/config for $VIRT ===
+RECEOF
+
+case "$VIRT" in
+    kvm|qemu)
+        RECS+=$'\n'"  Hypervisor: KVM/QEMU (Proxmox, libvirt, oVirt, ...)"
+        RECS+=$'\n'"  vCPU:       2+ (Skylake-Client+ or host-passthrough for AES-NI)"
+        RECS+=$'\n'"  RAM:        2 GiB minimum, 4 GiB+ for active DCs"
+        RECS+=$'\n'"  Disk:       virtio-blk or virtio-scsi (NOT IDE/SATA)"
+        RECS+=$'\n'"  NIC:        virtio-net (NOT e1000/rtl8139)"
+        RECS+=$'\n'"  Agent:      qemu-guest-agent (this script just installed it)"
+        RECS+=$'\n'"  Time:       enable virtio-rtc; chrony is authoritative for AD time"
+        ;;
+    vmware)
+        RECS+=$'\n'"  Hypervisor: VMware (ESXi / vCenter / Workstation / Fusion)"
+        RECS+=$'\n'"  vCPU:       2+, expose AES-NI in CPU/MMU virt settings"
+        RECS+=$'\n'"  RAM:        2 GiB minimum, 4 GiB+ for active DCs (no ballooning)"
+        RECS+=$'\n'"  Disk:       Paravirtual SCSI (PVSCSI) controller"
+        RECS+=$'\n'"  NIC:        vmxnet3 (NOT e1000)"
+        RECS+=$'\n'"  Agent:      open-vm-tools (this script just installed it)"
+        RECS+=$'\n'"  Time:       disable VMware Tools time-sync; chrony manages domain time"
+        ;;
+    microsoft)
+        RECS+=$'\n'"  Hypervisor: Microsoft Hyper-V"
+        RECS+=$'\n'"  Generation: 2 (UEFI). Disable Secure Boot (cloud-image bootloader)"
+        RECS+=$'\n'"  vCPU:       2+, virtualization extensions exposed"
+        RECS+=$'\n'"  RAM:        2 GiB+ STATIC; do not use Dynamic Memory on AD DCs"
+        RECS+=$'\n'"  Disk:       SCSI controller (NOT IDE)"
+        RECS+=$'\n'"  NIC:        Hyper-V synthetic adapter (default for Gen2)"
+        RECS+=$'\n'"  Integration: enable Time Sync, Heartbeat, Guest Service Interface"
+        RECS+=$'\n'"  Agent:      hyperv-daemons (this script just installed it)"
+        RECS+=$'\n'"  Checkpoints: prefer offline (Standard) checkpoints over Production"
+        RECS+=$'\n'"               for AD DCs — VSS-quiesced live snapshots interact"
+        RECS+=$'\n'"               poorly with USN replication semantics."
+        ;;
+    oracle)
+        RECS+=$'\n'"  Hypervisor: Oracle VirtualBox"
+        RECS+=$'\n'"  No headless guest-agent .deb is staged. If you want VBoxClient"
+        RECS+=$'\n'"  features (clipboard, file integration), install"
+        RECS+=$'\n'"  virtualbox-guest-utils manually (~30 MB of X dependencies)."
+        ;;
+    none)
+        RECS+=$'\n'"  Bare-metal install detected — no virtualization-specific advice."
+        RECS+=$'\n'"  Make sure chrony has reachable upstream NTP, the NIC is wired,"
+        RECS+=$'\n'"  and the BIOS clock is sane."
+        ;;
+    *)
+        RECS+=$'\n'"  Unknown environment '$VIRT'. No specific recommendations."
+        RECS+=$'\n'"  AD DC operation does not require a guest agent — run it without."
+        ;;
+esac
+
+log ""
+printf '%s\n' "$RECS" | tee -a "$LOGFILE"
+
+# Write the motd snippet — visible at every SSH login until removed.
+{
+    echo
+    echo "=== Samba AD DC Appliance: first-boot host integration ==="
+    echo "Detected: $VIRT"
+    printf '%s\n' "$INSTALLED_NOTE" | sed 's/^/  /'
+    printf '%s\n' "$RECS"
+    echo
+    echo "(Remove $MOTD to silence this banner.)"
+    echo
+} > "$MOTD"
+
+# Cleanup: remove caches for hypervisors we're not on, keep ours plus the
+# manifest (handy for diagnostics).
+log ""
+log "cleaning up unused guest-agent caches..."
+shopt -s nullglob
+for d in "$CACHE"/*/; do
+    name=$(basename "$d")
+    if [[ "$name" != "$PKG" ]]; then
+        log "  removing $d"
+        rm -rf "$d"
+    fi
+done
+shopt -u nullglob
+
+# Mark done; disable the unit so subsequent boots are clean.
+touch "$MARKER"
+log "samba-firstboot complete; marker at $MARKER"
+systemctl disable samba-firstboot.service >>"$LOGFILE" 2>&1 || true
+FBEOF
+chmod +x /usr/local/sbin/samba-firstboot
+
+cat > /etc/systemd/system/samba-firstboot.service <<'UEOF'
+[Unit]
+Description=Samba AD DC Appliance first-boot host integration
+ConditionPathExists=!/var/lib/samba-firstboot.done
+After=local-fs.target
+# Run before samba-ad-dc so the guest agent is up before any AD traffic.
+# samba-ad-dc is masked at image-prep time and only enabled by samba-sconfig
+# after a join/provision, so this ordering is mostly defensive.
+Before=samba-ad-dc.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/samba-firstboot
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target
+UEOF
+
+systemctl daemon-reload
+systemctl enable samba-firstboot.service
+
+#===============================================================================
+# 23. FINAL CLEANUP
 #===============================================================================
 log "Final cleanup..."
 apt-get autoremove -y --purge
@@ -831,15 +1063,18 @@ log "=========================================="
 log " Image preparation complete."
 log "=========================================="
 echo ""
-echo "  Hypervisor:   ${VIRT_TYPE}"
-echo "  Samba:        $(samba --version 2>/dev/null || echo 'check manually')"
-echo "  PowerShell:   $(pwsh --version 2>/dev/null || echo 'not installed')"
-echo "  Chrony:       $(chronyc --version 2>/dev/null || echo 'check manually')"
+echo "  Samba:         $(samba --version 2>/dev/null || echo 'check manually')"
+echo "  PowerShell:    $(pwsh --version 2>/dev/null || echo 'not installed')"
+echo "  Chrony:        $(chronyc --version 2>/dev/null || echo 'check manually')"
+echo "  Guest agents:  $(ls -1 /var/cache/samba-appliance/vmtools/ 2>/dev/null | grep -v ^manifest$ | tr '\n' ' ')"
 echo ""
-echo "  Removed:      ${REMOVE_PKGS[*]}"
+echo "  Removed:       ${REMOVE_PKGS[*]}"
 echo ""
 echo "  Next steps:"
-echo "    1. Verify: /usr/local/sbin/samba-sconfig exists"
-echo "    2. Shut down and snapshot this VM as 'golden-image'"
-echo "    3. On deployment, run: sudo samba-sconfig"
+echo "    1. Shut down this VM. The shutdown-state disk is the host-agnostic"
+echo "       deploy master — copy/export it to any hypervisor you want."
+echo "    2. On a deployed VM's first boot, samba-firstboot.service will detect"
+echo "       the actual hypervisor, install the matching guest agent offline,"
+echo "       and print recommended VM hardware to the console + /etc/motd.d/."
+echo "    3. Run 'sudo samba-sconfig' to provision or join a domain."
 echo ""

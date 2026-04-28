@@ -139,20 +139,65 @@ step "6. run prepare-image.sh on $VM_NAME"
 ssh_vm 'sudo bash /tmp/prepare-image.sh'
 ssh_vm 'sudo install -m 0755 /tmp/samba-sconfig.sh /usr/local/sbin/samba-sconfig'
 
-step "7. shutdown + checkpoint as $GOLDEN_CHECKPOINT"
+step "7. shutdown for deploy-master snapshot"
+# This is the host-agnostic master: prepare-image.sh has finished, but
+# samba-firstboot has NOT yet fired. The disk image at this point can be
+# copied to any hypervisor — the firstboot service will detect the
+# environment on its first run there and install the matching guest agent
+# from the pre-staged offline cache.
 ssh_vm 'sudo shutdown -h now' || true
 
-say "wait for VM to power off (up to 60s)"
-for _ in $(seq 1 30); do
-    state=$(ssh_host "(Get-VM -Name '$VM_NAME').State.ToString()" 2>/dev/null | tr -d '\r')
-    [[ "$state" == "Off" ]] && break
+wait_off() {
+    local name="$1" tries="$2"
+    for _ in $(seq 1 "$tries"); do
+        state=$(ssh_host "(Get-VM -Name '$name').State.ToString()" 2>/dev/null | tr -d '\r')
+        [[ "$state" == "Off" ]] && return 0
+        sleep 2
+    done
+    return 1
+}
+
+if ! wait_off "$VM_NAME" 30; then
+    say "VM did not power off cleanly after 60s"; exit 1
+fi
+
+ssh_host "Checkpoint-VM -Name '$VM_NAME' -SnapshotName 'deploy-master'"
+say "checkpoint 'deploy-master' created (host-agnostic, pre-firstboot)"
+
+step "8. boot once to fire samba-firstboot (Hyper-V tailoring)"
+ssh_host "Start-VM -Name '$VM_NAME'"
+
+say "wait for samba-firstboot.done marker (up to 120s)"
+done_marker=0
+for _ in $(seq 1 60); do
+    if ssh -o ConnectTimeout=3 -o BatchMode=yes \
+           -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+           -J "${HV_USER}@${HV_HOST}" "${VM_USER}@${VM_IP}" \
+           'test -f /var/lib/samba-firstboot.done' 2>/dev/null; then
+        done_marker=1
+        break
+    fi
     sleep 2
 done
+[[ $done_marker -eq 1 ]] || { say "samba-firstboot.done never appeared"; exit 1; }
+
+# Show what firstboot did so it's in the build log.
+ssh_vm 'sudo cat /var/log/samba-firstboot.log 2>/dev/null | tail -40' || true
+
+step "9. shutdown + checkpoint as $GOLDEN_CHECKPOINT"
+ssh_vm 'sudo shutdown -h now' || true
+if ! wait_off "$VM_NAME" 30; then
+    say "VM did not power off cleanly after 60s"; exit 1
+fi
 
 ssh_host "Checkpoint-VM -Name '$VM_NAME' -SnapshotName '$GOLDEN_CHECKPOINT'"
-say "checkpoint $GOLDEN_CHECKPOINT created on $VM_NAME"
+say "checkpoint $GOLDEN_CHECKPOINT created (Hyper-V-tailored, lab-ready)"
 
 echo
-echo "Done. Next:"
+echo "Done. Snapshots on '$VM_NAME':"
+echo "  deploy-master   host-agnostic, ship-this-one"
+echo "  $GOLDEN_CHECKPOINT     Hyper-V tailored, used by lab/run-scenario.sh"
+echo
+echo "Next:"
 echo "  lab/run-scenario.sh smoke-prepared-image"
 echo "  lab/run-scenario.sh join-dc"
