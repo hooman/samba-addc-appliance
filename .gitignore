@@ -34,3 +34,7 @@ Temporary Items
 # Scenario transcripts are local evidence. Keep distilled findings in
 # test-results/*.md instead of committing raw run logs.
 test-results/*.log
+
+# Release artifacts (vhdx / qcow2 / vmdk / ova are multi-GB each).
+# Reproducible from a deploy-master snapshot via lab/export-deploy-master.sh.
+dist/
