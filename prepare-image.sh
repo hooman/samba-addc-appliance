@@ -127,48 +127,83 @@ log "Package cleanup complete."
 # Manifest: /var/cache/samba-appliance/vmtools/manifest maps systemd-detect-virt
 # return values to package names. Single source of truth for the firstboot
 # script.
-log "Pre-downloading guest agents for all supported hypervisors..."
+log "Pre-downloading guest agents and cloud helpers for all supported targets..."
 
 VMTOOLS_CACHE="/var/cache/samba-appliance/vmtools"
 mkdir -p "$VMTOOLS_CACHE"
 
-# virt-type -> package name. Multiple keys can map to the same package
-# (kvm and qemu both want qemu-guest-agent), so we dedupe before downloading.
-declare -A VM_PKGS=(
-    ["kvm"]="qemu-guest-agent"
-    ["qemu"]="qemu-guest-agent"
-    ["vmware"]="open-vm-tools"
-    ["microsoft"]="hyperv-daemons"
+# Per-virt package set installed by samba-firstboot when that virt-type is
+# detected. Each value is a space-separated list. Everything below is in
+# Debian's main archive and DFSG-free — freely redistributable.
+#
+# Notes on what's NOT pre-staged and why:
+#   - virtualbox-guest-utils ships in contrib, not main, so the cloud
+#     image's sources don't carry it. VirtualBox deployments can install
+#     it manually after enabling contrib.
+#   - walinuxagent isn't in Trixie main; modern Azure setups use cloud-init
+#     for the things walinuxagent used to handle, so we just install
+#     cloud-init on Azure.
+#   - xe-guest-utilities isn't in Trixie main either; a kernel-level Xen
+#     guest works without it.
+declare -A VIRT_PKGS=(
+    ["amazon"]="qemu-guest-agent cloud-init cloud-guest-utils"
+    ["kvm"]="qemu-guest-agent cloud-guest-utils"
+    ["qemu"]="qemu-guest-agent cloud-guest-utils"
+    ["microsoft"]="hyperv-daemons cloud-guest-utils"
+    ["vmware"]="open-vm-tools cloud-guest-utils"
+    ["oracle"]="cloud-guest-utils"
+    ["xen"]="qemu-guest-agent cloud-guest-utils"
 )
 
-declare -A DOWNLOADED=()
-for virt in "${!VM_PKGS[@]}"; do
-    pkg="${VM_PKGS[$virt]}"
-    [[ -n "${DOWNLOADED[$pkg]:-}" ]] && continue
+# samba-firstboot may augment the install list dynamically based on DMI
+# probes (e.g. add cloud-init when the chassis-asset-tag identifies Azure
+# inside an otherwise generic 'microsoft' virt-type). Anything that may
+# be promoted that way needs to be in the cache regardless of the static
+# manifest, so we pre-fetch it as an extra here.
+EXTRA_DOWNLOADS="cloud-init"
+
+# Union of every package across every virt + the extras — what we actually
+# need to fetch. Per-package directories give samba-firstboot a clean
+# "install just this package's cache" target.
+declare -A PKGS_SEEN
+for virt in "${!VIRT_PKGS[@]}"; do
+    for pkg in ${VIRT_PKGS[$virt]}; do
+        PKGS_SEEN[$pkg]=1
+    done
+done
+for pkg in $EXTRA_DOWNLOADS; do
+    PKGS_SEEN[$pkg]=1
+done
+
+for pkg in "${!PKGS_SEEN[@]}"; do
     dest="$VMTOOLS_CACHE/$pkg"
     mkdir -p "$dest/partial"
     log "  pre-download $pkg -> $dest"
     # --download-only puts .debs in Dir::Cache::archives without installing.
-    # apt only fetches deps that aren't already satisfied on the prepared
-    # image; deps already on disk stay (and dpkg -i at firstboot is a no-op
-    # for those). --no-install-recommends keeps the bundle small.
-    apt-get install -y --download-only --no-install-recommends \
-        -o "Dir::Cache::archives=$dest" \
-        "$pkg" 2>&1 | tail -3
+    # --reinstall forces a re-download even when the package is already on
+    # the prepared image (cloud-guest-utils is shipped on the Debian cloud
+    # base; without --reinstall apt would say "nothing to do" and leave
+    # us with an empty cache). --no-install-recommends keeps each bundle
+    # small.
+    if ! apt-get install -y --download-only --reinstall --no-install-recommends \
+            -o "Dir::Cache::archives=$dest" \
+            "$pkg" 2>&1 | tail -3; then
+        warn "    WARN: download of $pkg failed (not in Debian main on this release; skipping)"
+    fi
     rm -rf "$dest/partial"
-    DOWNLOADED[$pkg]=1
 done
 
-# Manifest in a stable format the firstboot script can grep.
+# Manifest in a stable format the firstboot script can read.
 {
-    echo "# samba-appliance guest-agent manifest"
-    echo "# format: systemd-detect-virt-value=package-name"
-    for virt in "${!VM_PKGS[@]}"; do
-        printf '%s=%s\n' "$virt" "${VM_PKGS[$virt]}"
+    echo "# samba-appliance guest-agent / cloud-helper manifest"
+    echo "# format: systemd-detect-virt-value=space-separated-package-list"
+    echo "# (samba-firstboot may augment this list dynamically — e.g. on Azure)"
+    for virt in "${!VIRT_PKGS[@]}"; do
+        printf '%s=%s\n' "$virt" "${VIRT_PKGS[$virt]}"
     done | sort
 } > "$VMTOOLS_CACHE/manifest"
 
-log "  staged guest-agent cache:"
+log "  staged cache (per-package):"
 du -sh "$VMTOOLS_CACHE"/* 2>/dev/null | sed 's|^|    |'
 
 #===============================================================================
@@ -884,48 +919,97 @@ fi
 VIRT=$(systemd-detect-virt 2>/dev/null || echo "none")
 log "host environment: $VIRT"
 
-# Look up the package for this virt-type from the manifest.
-PKG=""
+# Look up the package list for this virt-type from the manifest.
+PKG_LIST=""
 if [[ -f "$MANIFEST" ]]; then
-    PKG=$(awk -F= -v v="$VIRT" 'NF==2 && $1==v {print $2; exit}' "$MANIFEST")
+    PKG_LIST=$(awk -F= -v v="$VIRT" 'NF>=2 && $1==v {sub(/^[^=]+=/, "", $0); print; exit}' "$MANIFEST")
 fi
 
+# Azure runs on Hyper-V, so systemd-detect-virt reports 'microsoft'. Tell
+# them apart by the chassis-asset-tag DMI string Azure sets to a fixed
+# value. When matched, augment the install list with cloud-init so the
+# Azure IMDS injection pathway (SSH keys, hostname, user-data) works.
+# walinuxagent's old responsibilities are largely covered by cloud-init
+# on modern Debian; we don't try to bundle walinuxagent itself because
+# it's not in Trixie main.
+AZURE_CHASSIS_TAG="7783-7084-3265-9085-8269-3286-77"
+if [[ "$VIRT" == "microsoft" ]] && \
+   [[ -r /sys/class/dmi/id/chassis_asset_tag ]] && \
+   [[ "$(cat /sys/class/dmi/id/chassis_asset_tag 2>/dev/null)" == "$AZURE_CHASSIS_TAG" ]]; then
+    log "Azure detected via DMI chassis-asset-tag; adding cloud-init"
+    PKG_LIST="$PKG_LIST cloud-init"
+fi
+
+# Per-package systemd unit map. Empty means "no service to enable".
+service_units_for() {
+    case "$1" in
+        qemu-guest-agent)  echo "qemu-guest-agent" ;;
+        open-vm-tools)     echo "open-vm-tools" ;;
+        # Trixie's hyperv-daemons ships hv-kvp-daemon + hv-vss-daemon as units.
+        # The historical hv-fcopy-daemon was retired upstream — file copy now
+        # happens via the in-kernel hv_fcopy module.
+        hyperv-daemons)    echo "hv-kvp-daemon hv-vss-daemon" ;;
+        # cloud-init enables its own 4-stage systemd units via postinst. We
+        # don't enable here; on next boot cloud-init runs naturally.
+        cloud-init)        echo "" ;;
+        # cloud-guest-utils is just CLI tools (growpart etc.); no services.
+        cloud-guest-utils) echo "" ;;
+        *)                 echo "" ;;
+    esac
+}
+
 INSTALLED_NOTE=""
-if [[ -z "$PKG" ]]; then
-    INSTALLED_NOTE="No guest-agent package staged for '$VIRT'. The DC will run\nwithout host-side integration; chrony handles time, ACPI handles\ngraceful shutdown — both work without an agent. Install one by\nhand if you want the management-plane integration."
+INSTALLED_PKGS=""
+FAILED_PKGS=""
+
+if [[ -z "$PKG_LIST" ]]; then
+    INSTALLED_NOTE="No guest-agent or cloud-helper package staged for '$VIRT'.\nThe DC will run without host-side integration; chrony handles time,\nACPI handles graceful shutdown — both work without an agent. Install\nany of /var/cache/samba-appliance/vmtools/<pkg>/*.deb by hand if you\nwant management-plane integration."
     log "$INSTALLED_NOTE"
 else
-    DEB_DIR="$CACHE/$PKG"
-    if [[ -d "$DEB_DIR" ]] && compgen -G "$DEB_DIR/*.deb" >/dev/null; then
-        log "installing $PKG from $DEB_DIR (offline)"
-        if dpkg -i "$DEB_DIR"/*.deb >>"$LOGFILE" 2>&1; then
-            systemctl daemon-reload || true
-            # Per-pkg services to enable. hyperv-daemons ships three units;
-            # the others bundle a single service named after the package.
-            case "$PKG" in
-                qemu-guest-agent) SVCS="qemu-guest-agent" ;;
-                open-vm-tools)    SVCS="open-vm-tools" ;;
-                # Trixie ships hv-kvp-daemon + hv-vss-daemon as units. The
-                # historical hv-fcopy-daemon was retired upstream — file copy
-                # now happens via the in-kernel hv_fcopy module.
-                hyperv-daemons)   SVCS="hv-kvp-daemon hv-vss-daemon" ;;
-                *)                SVCS="" ;;
-            esac
-            for s in $SVCS; do
-                if systemctl enable --now "$s" >>"$LOGFILE" 2>&1; then
-                    log "  enabled+started: $s"
-                else
-                    log "  WARN: could not start $s (see log)"
-                fi
-            done
-            INSTALLED_NOTE="Guest agent: $PKG (installed)"
-        else
-            INSTALLED_NOTE="ERROR: dpkg -i of $PKG failed; see $LOGFILE"
-            log "$INSTALLED_NOTE"
+    log "installing for $VIRT: $PKG_LIST"
+    for pkg in $PKG_LIST; do
+        deb_dir="$CACHE/$pkg"
+        if [[ ! -d "$deb_dir" ]] || ! compgen -G "$deb_dir/*.deb" >/dev/null; then
+            log "  WARN: $pkg has no .deb files in cache (skipping)"
+            FAILED_PKGS="$FAILED_PKGS $pkg"
+            continue
         fi
-    else
-        INSTALLED_NOTE="ERROR: $DEB_DIR has no .deb files (cache corrupt?)"
+        log "  dpkg -i $pkg (offline from $deb_dir)"
+        if dpkg -i "$deb_dir"/*.deb >>"$LOGFILE" 2>&1; then
+            INSTALLED_PKGS="$INSTALLED_PKGS $pkg"
+        else
+            log "    ERROR: dpkg -i of $pkg failed; see $LOGFILE"
+            FAILED_PKGS="$FAILED_PKGS $pkg"
+        fi
+    done
+
+    systemctl daemon-reload || true
+
+    for pkg in $INSTALLED_PKGS; do
+        for svc in $(service_units_for "$pkg"); do
+            if systemctl enable --now "$svc" >>"$LOGFILE" 2>&1; then
+                log "  enabled+started: $svc ($pkg)"
+            else
+                log "  WARN: could not start $svc (from $pkg)"
+            fi
+        done
+    done
+
+    if [[ -n "$INSTALLED_PKGS" ]]; then
+        INSTALLED_NOTE="Installed:$INSTALLED_PKGS"
+        [[ -n "$FAILED_PKGS" ]] && INSTALLED_NOTE+=$'\n'"Failed:   $FAILED_PKGS (see $LOGFILE)"
+    elif [[ -n "$FAILED_PKGS" ]]; then
+        INSTALLED_NOTE="ERROR: nothing installed; failed:$FAILED_PKGS"
         log "$INSTALLED_NOTE"
+    fi
+
+    # If we just installed cloud-init, prompt the user to reboot. cloud-init
+    # has a 4-stage state machine that's tied into systemd's boot sequence;
+    # running it now from late in the current boot won't pick up everything
+    # the way an early-boot run does. A reboot is the path of least surprise.
+    if echo " $INSTALLED_PKGS " | grep -q ' cloud-init '; then
+        INSTALLED_NOTE+=$'\n'"NOTE: reboot once to let cloud-init run from early boot and apply"
+        INSTALLED_NOTE+=$'\n'"      IMDS data (SSH keys, hostname) from your cloud platform."
     fi
 fi
 
@@ -955,17 +1039,47 @@ case "$VIRT" in
         RECS+=$'\n'"  Time:       disable VMware Tools time-sync; chrony manages domain time"
         ;;
     microsoft)
-        RECS+=$'\n'"  Hypervisor: Microsoft Hyper-V"
-        RECS+=$'\n'"  Generation: 2 (UEFI). Disable Secure Boot (cloud-image bootloader)"
-        RECS+=$'\n'"  vCPU:       2+, virtualization extensions exposed"
-        RECS+=$'\n'"  RAM:        2 GiB+ STATIC; do not use Dynamic Memory on AD DCs"
-        RECS+=$'\n'"  Disk:       SCSI controller (NOT IDE)"
-        RECS+=$'\n'"  NIC:        Hyper-V synthetic adapter (default for Gen2)"
-        RECS+=$'\n'"  Integration: enable Time Sync, Heartbeat, Guest Service Interface"
-        RECS+=$'\n'"  Agent:      hyperv-daemons (this script just installed it)"
-        RECS+=$'\n'"  Checkpoints: prefer offline (Standard) checkpoints over Production"
-        RECS+=$'\n'"               for AD DCs — VSS-quiesced live snapshots interact"
-        RECS+=$'\n'"               poorly with USN replication semantics."
+        if [[ "$(cat /sys/class/dmi/id/chassis_asset_tag 2>/dev/null)" == "$AZURE_CHASSIS_TAG" ]]; then
+            RECS+=$'\n'"  Platform:   Microsoft Azure (Hyper-V-backed)"
+            RECS+=$'\n'"  vCPU:       2+, AES-NI exposed (default on Standard SKUs)"
+            RECS+=$'\n'"  RAM:        2 GiB+ (e.g. Standard_B2s for tests, _D2s_v5 for prod)"
+            RECS+=$'\n'"  Disk:       Premium SSD; use a dedicated managed disk for /var/lib/samba"
+            RECS+=$'\n'"  NIC:        Accelerated Networking ON if SKU supports it"
+            RECS+=$'\n'"  Agents:     hyperv-daemons + cloud-init (just installed)"
+            RECS+=$'\n'"  Time:       chrony is authoritative; disable Azure time-sync if it competes"
+            RECS+=$'\n'"  Backups:    Azure Backup VM-level snapshots are application-consistent"
+            RECS+=$'\n'"              via VSS — generally OK for an AD DC, but verify each release"
+        else
+            RECS+=$'\n'"  Hypervisor: Microsoft Hyper-V (on-prem)"
+            RECS+=$'\n'"  Generation: 2 (UEFI). Disable Secure Boot (cloud-image bootloader)"
+            RECS+=$'\n'"  vCPU:       2+, virtualization extensions exposed"
+            RECS+=$'\n'"  RAM:        2 GiB+ STATIC; do not use Dynamic Memory on AD DCs"
+            RECS+=$'\n'"  Disk:       SCSI controller (NOT IDE)"
+            RECS+=$'\n'"  NIC:        Hyper-V synthetic adapter (default for Gen2)"
+            RECS+=$'\n'"  Integration: enable Time Sync, Heartbeat, Guest Service Interface"
+            RECS+=$'\n'"  Agent:      hyperv-daemons (this script just installed it)"
+            RECS+=$'\n'"  Checkpoints: prefer offline (Standard) checkpoints over Production"
+            RECS+=$'\n'"               for AD DCs — VSS-quiesced live snapshots interact"
+            RECS+=$'\n'"               poorly with USN replication semantics."
+        fi
+        ;;
+    amazon)
+        RECS+=$'\n'"  Platform:   Amazon EC2 (Nitro)"
+        RECS+=$'\n'"  Instance:   M-class or T-class with at least 2 vCPU / 2 GiB"
+        RECS+=$'\n'"  Disk:       gp3 EBS for the root volume; consider separate volume for /var/lib/samba"
+        RECS+=$'\n'"  NIC:        ENA driver (kernel built-in)"
+        RECS+=$'\n'"  Agents:     qemu-guest-agent + cloud-init + cloud-guest-utils (installed)"
+        RECS+=$'\n'"  Networking: place DCs in private subnets with VPC peering or AD-replication NACLs"
+        RECS+=$'\n'"  Backups:    EBS snapshots are crash-consistent — schedule with care for an AD DC"
+        ;;
+    xen)
+        RECS+=$'\n'"  Hypervisor: Xen / Citrix Hypervisor / XCP-ng"
+        RECS+=$'\n'"  vCPU:       2+, expose AES-NI"
+        RECS+=$'\n'"  RAM:        2 GiB+, no ballooning for AD DCs"
+        RECS+=$'\n'"  Disk:       PVHVM virtual disk"
+        RECS+=$'\n'"  NIC:        netfront (paravirtualized)"
+        RECS+=$'\n'"  Agents:     qemu-guest-agent + xe-guest-utilities (installed)"
+        RECS+=$'\n'"  Time:       sync via Xen virtio-rtc; chrony authoritative for AD"
         ;;
     oracle)
         RECS+=$'\n'"  Hypervisor: Oracle VirtualBox"
@@ -999,14 +1113,16 @@ printf '%s\n' "$RECS" | tee -a "$LOGFILE"
     echo
 } > "$MOTD"
 
-# Cleanup: remove caches for hypervisors we're not on, keep ours plus the
-# manifest (handy for diagnostics).
+# Cleanup: remove caches for packages we did not install, keep the ones we
+# did (handy for re-running dpkg -i if something goes sideways) plus the
+# manifest. Builds a space-padded keep-list and a substring match.
 log ""
-log "cleaning up unused guest-agent caches..."
+log "cleaning up unused guest-agent / cloud-helper caches..."
+KEEP=" $(echo "$INSTALLED_PKGS" | xargs) "
 shopt -s nullglob
 for d in "$CACHE"/*/; do
     name=$(basename "$d")
-    if [[ "$name" != "$PKG" ]]; then
+    if [[ "$KEEP" != *" $name "* ]]; then
         log "  removing $d"
         rm -rf "$d"
     fi
