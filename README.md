@@ -241,6 +241,19 @@ has no AD cleanup).
 For the full test plan and important tests to add next, see
 [`docs/LAB-TESTING.md`](docs/LAB-TESTING.md).
 
+## Releasing and Deploying
+
+`lab/export-deploy-master.sh` packages the host-agnostic `deploy-master`
+checkpoint into four interchange formats (vhdx / qcow2 / vmdk / ova
+plus `SHA256SUMS`) under `dist/<version>/`. Deployers import the matching
+artifact on their hypervisor; first boot fires `samba-firstboot`, which
+detects the actual virt environment and offline-installs the right guest
+agent from the pre-staged cache.
+
+Full workflow + per-hypervisor import recipes (Hyper-V, KVM/libvirt,
+Proxmox, VMware, VirtualBox, Nutanix AHV) and the SSH-key-from-builder
+caveat live in [`docs/RELEASE.md`](docs/RELEASE.md).
+
 ## Important Design Notes
 
 - Samba does not implement DFSR. SYSVOL replication is handled explicitly by
