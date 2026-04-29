@@ -1,8 +1,11 @@
 #cloud-config
 # Per-VM cloud-init seed for the Samba AD DC appliance base image.
-# Substituted by lab/stage-samba-base.sh from CLI flags + ssh pubkey.
-# Placeholder names used below (each wrapped in @@...@@ in the template):
-#   HOSTNAME, FQDN, DOMAIN, USERNAME, SSH_PUBKEY
+# Substituted by lab/stage-samba-base.sh.
+# Placeholders (each wrapped in @@...@@ in the template):
+#   HOSTNAME, FQDN, DOMAIN, USERNAME    — single-token sed substitutions
+#   SSH_KEYS_BLOCK                      — multi-line awk substitution
+#                                         (one '      - <pubkey>' line per
+#                                         key in lab/keys/*.pub)
 
 hostname: @@HOSTNAME@@
 fqdn: @@FQDN@@
@@ -14,7 +17,7 @@ users:
     groups: [sudo, adm]
     shell: /bin/bash
     ssh_authorized_keys:
-      - @@SSH_PUBKEY@@
+@@SSH_KEYS_BLOCK@@
 
 ssh_pwauth: false
 disable_root: true

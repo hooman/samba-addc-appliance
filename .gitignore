@@ -38,3 +38,9 @@ test-results/*.log
 # Release artifacts (vhdx / qcow2 / vmdk / ova are multi-GB each).
 # Reproducible from a deploy-master snapshot via lab/export-deploy-master.sh.
 dist/
+
+# Operator SSH public keys baked into the master image at build time —
+# stay local to the builder's environment. The README inside is the
+# only tracked file; the *.pub files vary per builder.
+lab/keys/*
+!lab/keys/README.md

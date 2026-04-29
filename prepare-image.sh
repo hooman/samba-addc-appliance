@@ -1167,11 +1167,13 @@ det_dhcp_domain=$(resolvectl domain 2>/dev/null \
                                           if ($i!="" && $i!=".") {print $i; exit}
                                       }}')
 # Reverse DNS for our IP — if the network has a PTR for us, that's a
-# strong hint the admin pre-staged a hostname here.
+# strong hint the admin pre-staged a hostname here. Strip the FQDN to
+# just the leading label; the wizard's set-hostname step needs a NetBIOS
+# short name, not a fully qualified one.
 det_ptr_name=""
 if [[ -n "$det_ip" ]]; then
     det_ptr_name=$(timeout 5 dig +short -x "$det_ip" 2>/dev/null \
-                    | awk 'NR==1 {sub(/\.$/,""); print}')
+                    | awk 'NR==1 {sub(/\.$/,""); split($0,a,"."); print a[1]}')
 fi
 # AD-DC discovery: if a DHCP-supplied domain has _ldap._tcp.<domain>
 # SRV records, an existing AD forest answers there — pre-fill the
@@ -1501,6 +1503,37 @@ show_firstboot_log() {
     fi
 }
 
+set_timezone() {
+    local cur suggested prefill new
+    cur=$(timedatectl show --property=Timezone --value 2>/dev/null || echo Etc/UTC)
+    suggested=""
+    # Best-effort network-based hint. ipapi.co's free /timezone endpoint
+    # returns a single Region/City string. Skipped silently when offline
+    # or rate-limited; the operator just types the answer.
+    if [[ -n "$(ip route show default 2>/dev/null)" ]]; then
+        suggested=$(timeout 5 curl -fsS https://ipapi.co/timezone 2>/dev/null \
+                     | tr -d '\r\n[:space:]')
+        # Reject anything that doesn't look like a tz name (e.g. error JSON).
+        case "$suggested" in
+            */*|UTC|Etc/UTC) ;;
+            *) suggested="" ;;
+        esac
+    fi
+    prefill="${suggested:-$cur}"
+    local prompt="Current timezone: ${cur}"
+    [[ -n "$suggested" && "$suggested" != "$cur" ]] && \
+        prompt+="\nNetwork-based suggestion: ${suggested}"
+    prompt+="\n\nEnter Region/City. Examples:\n  America/Los_Angeles  Europe/London  Asia/Tokyo  Etc/UTC"
+    new=$(whiptail --inputbox "$prompt" 14 "$WT_WIDTH" "$prefill" 3>&1 1>&2 2>&3) || return
+    [[ -n "$new" ]] || return
+    if timedatectl list-timezones 2>/dev/null | grep -qx "$new"; then
+        sudo timedatectl set-timezone "$new"
+        whiptail --msgbox "Timezone is now: $(timedatectl show --property=Timezone --value)\n\nLocal time: $(date)" 11 "$WT_WIDTH"
+    else
+        whiptail --msgbox "Unknown timezone: $new\n\nUse 'Region/City' as listed by:\n  timedatectl list-timezones" 11 "$WT_WIDTH"
+    fi
+}
+
 mark_done_tui() {
     if [[ -f "$DEFAULT_PWD_MARKER" ]]; then
         whiptail --msgbox "Change the ${SELF_USER} password before marking setup complete.\n\nThe default password is documented and trivially findable." 11 "$WT_WIDTH"
@@ -1526,37 +1559,31 @@ mark_done_tui() {
 print_banner() {
     load_detect_env
     clear
+    local hn tz
+    hn=$(hostnamectl hostname 2>/dev/null || hostname)
+    tz=$(timedatectl show --property=Timezone --value 2>/dev/null || echo Etc/UTC)
     cat <<BAN
-================================================================
+==============================================================
   Samba AD DC Appliance — initial setup
-================================================================
-  Hostname:    $(hostnamectl hostname 2>/dev/null || hostname)
-  IP:          ${DET_IP:-<no IP yet>}
-  Gateway:     ${DET_GATEWAY:-<none>}
+==============================================================
 BAN
-    if [[ -n "$DET_DHCP_DNS" ]]; then
-        printf '  DNS:         %s  (DHCP-supplied; 1.1.1.1 is fallback)\n' "$DET_DHCP_DNS"
-    fi
-    if [[ -n "$DET_DHCP_DOMAIN" ]]; then
-        printf '  DHCP domain: %s\n' "$DET_DHCP_DOMAIN"
-    fi
-    if [[ -n "$DET_PTR_NAME" ]]; then
-        printf '  PTR for IP : "%s"  (network expects this hostname)\n' "$DET_PTR_NAME"
+    printf '  Host: %-15s  IP: %-18s  TZ: %s\n' \
+        "$hn" "${DET_IP:-<none>}" "$tz"
+    printf '  GW:   %-15s  DNS: %s\n' \
+        "${DET_GATEWAY:-<none>}" "${DET_DHCP_DNS:-1.1.1.1 (fallback)}"
+    if [[ -n "$DET_PTR_NAME" || -n "$DET_DHCP_DOMAIN" ]]; then
+        printf '  PTR:  %-15s  DHCP-domain: %s\n' \
+            "${DET_PTR_NAME:-<none>}" "${DET_DHCP_DOMAIN:-<none>}"
     fi
     if [[ -n "$DET_AD_DC" ]]; then
-        printf '  AD DC found: %s  (existing forest at %s)\n' "$DET_AD_DC" "$DET_DHCP_DOMAIN"
-        printf '               -> "samba-sconfig join-dc" is the natural next step\n'
+        printf '  AD:   join %s — DC at %s\n' "$DET_DHCP_DOMAIN" "$DET_AD_DC"
     elif [[ -n "$DET_DHCP_DOMAIN" ]]; then
-        printf '  No AD found at "%s" — provision-new can use it as the realm.\n' "$DET_DHCP_DOMAIN"
+        printf '  AD:   no DC at %s — provision-new can use this realm\n' \
+            "$DET_DHCP_DOMAIN"
     fi
-    echo
-    if [[ -f "$DEFAULT_PWD_MARKER" ]]; then
-        echo "  Default password ACTIVE — change it before allowing remote use."
-    else
-        echo "  Default password has been changed."
-    fi
-    echo "================================================================"
-    echo
+    [[ -f "$DEFAULT_PWD_MARKER" ]] && \
+        echo "  Default password ACTIVE — change before remote use"
+    echo "=============================================================="
 }
 
 action_update() {
@@ -1604,7 +1631,8 @@ action_run_tui() {
             "3" "Change ${SELF_USER} password" \
             "4" "Add an SSH authorized_keys entry" \
             "5" "Set hostname (suggests PTR if detected)" \
-            "6" "Show samba-firstboot log" \
+            "6" "Set timezone (with optional network hint)" \
+            "7" "Show samba-firstboot log" \
             "S" "Drop to a root shell" \
             "D" "Mark setup complete and proceed to login" \
             "B" "Back to outer text menu" \
@@ -1615,7 +1643,8 @@ action_run_tui() {
             3) change_password ;;
             4) add_ssh_key ;;
             5) set_hostname ;;
-            6) show_firstboot_log ;;
+            6) set_timezone ;;
+            7) show_firstboot_log ;;
             S|s) clear; sudo bash; ;;
             D|d) mark_done_tui ;;
             B|b|"") return ;;
@@ -1667,23 +1696,19 @@ action_quit() {
     exec /bin/bash --login
 }
 
-# Outer menu loop.
+# Outer menu loop. Layout target: ≤24 lines on a fresh boot console so
+# nothing scrolls off the top of an 80x24 VT.
 while true; do
     print_banner
     read -r upg sec < <(count_upgrades)
-
-    echo "  Choose an action (single letter, then Enter):"
     echo
     if [[ "$upg" -gt 0 ]] 2>/dev/null; then
-        printf '    [U]  Update OS packages   (%d pending, %d security)\n' "$upg" "$sec"
+        printf '  [U] Update OS (%d pending, %d security)\n' "$upg" "$sec"
     fi
-    echo "    [P]  Set ${SELF_USER} password & enable SSH password auth"
-    echo "    [I]  Run the interactive setup wizard (TUI)"
-    echo "    [S]  Drop to a root shell"
-    echo "    [D]  Mark setup complete & proceed to login"
-    echo "    [H]  Halt the VM"
-    echo "    [R]  Reboot"
-    echo "    [Q]  Skip menu for this boot"
+    echo  "  [P] Set ${SELF_USER} password (also enables SSH password auth)"
+    echo  "  [I] Interactive setup wizard (TUI: network, hostname, timezone, key)"
+    echo  "  [S] Root shell    [D] Mark setup complete    [Q] Skip menu"
+    echo  "  [H] Halt          [R] Reboot"
     echo
     read -rp "  > " choice
     case "${choice^^}" in

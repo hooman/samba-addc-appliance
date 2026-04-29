@@ -260,12 +260,13 @@ enable samba-firstboot.service && reboot`.
 The deployed appliance gives you **three** independent ways in. You only
 need one of them to work:
 
-1. **SSH with the build operator's key.** The deploy-master was prepared
-   by an operator whose `~/.ssh/id_ed25519.pub` was baked into the
-   cloud-init seed at build time. SSH login as `debadmin` with that key
-   has worked since first boot. Coordinate out-of-band: get the operator
-   to confirm the key fingerprint, or have them rebuild with your key
-   (`lab/stage-samba-base.sh -k yourkey.pub`).
+1. **SSH with a baked-in key.** The deploy-master was prepared by an
+   operator whose pubkey(s) lived under `lab/keys/*.pub` at master-build
+   time. SSH login as `debadmin` with any of those keys has worked since
+   first boot. Coordinate out-of-band: get the operator to confirm a
+   fingerprint, or have them rebuild after dropping your pubkey into
+   `lab/keys/`. (Releases produced for outside distribution may have an
+   empty `lab/keys/` and rely entirely on path 2 or 3 below.)
 
 2. **Console password.** `debadmin` ships with a documented default
    password — **`samba-appliance-please-change-me`** — that works only

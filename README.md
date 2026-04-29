@@ -1,30 +1,31 @@
 # Samba AD DC Appliance
 
 This repository builds and tests a small **Samba Active Directory Domain
-Controller appliance** on Debian 13. The appliance is meant to feel like a
-headless server product: prepare a clean image once, then use a local
-`sconfig`-style tool to provision, join, harden, diagnose, and maintain the
-domain controller.
+Controller appliance** on Debian 13. The appliance is meant to feel like
+a headless server product: deploy a prepared image, finish initial
+configuration at the console, run a local `sconfig`-style tool to
+provision or join a domain.
+
+## Where do I start?
+
+| If you want to … | Read |
+| --- | --- |
+| **Deploy** the appliance from a release artifact (`.ova` / `.qcow2` / `.vhdx`) on your hypervisor | [`docs/RELEASE.md`](docs/RELEASE.md) — import recipes per hypervisor, first-boot wizard, day-one configuration |
+| **Build your own master** image, run the test lab, or contribute changes | [`docs/SETUP.md`](docs/SETUP.md) — Mac tools, Hyper-V host, external artifacts, sibling-repo checkout, and the "First-Time Lab Setup" walkthrough below |
+| Understand the **test methodology** | [`docs/LAB-TESTING.md`](docs/LAB-TESTING.md) — scenario runner, existing scenarios, planned coverage |
+| Understand the **three-repo split** | [`docs/REPO-SPLIT.md`](docs/REPO-SPLIT.md) — boundaries between this repo, `lab-kit`, and `lab-router` |
 
 The appliance is exercised against a Windows Server 2025 forest with
 Microsoft security baseline GPOs applied. The lab is built from three
-sibling repositories:
+sibling repositories living next to each other on disk:
 
 - [`lab-kit`](../lab-kit/) — reusable appliance lab orchestration
 - [`lab-router`](../lab-router/) — simple reusable lab router VM
 - `samba-addc-appliance` — this Samba appliance and its scenarios
 
-See [`docs/REPO-SPLIT.md`](docs/REPO-SPLIT.md) for the split history and
-current repo boundaries.
-
 The lab exists because most of the important behavior is interoperability
 behavior: Kerberos, LDAP signing, Samba replication, Windows KCC
 expectations, DNS, and SYSVOL handling.
-
-**New here?** Start with [`docs/SETUP.md`](docs/SETUP.md) — it walks
-through Mac tools, the Hyper-V host, external artifacts (ISOs + Microsoft
-baseline), sibling-repo checkout, and a verification checklist. Return
-to "First-Time Lab Setup" below once that passes.
 
 ## Repository Map
 
@@ -174,9 +175,18 @@ ssh nmadmin@server 'pwsh -File D:\ISO\lab-scripts\Apply-SecurityBaseline.ps1'
 
 ### 5. Build the Samba appliance image
 
-A single command stages a Debian cloud-init seed, creates the Hyper-V VM,
-runs `prepare-image.sh`, and snapshots the result as `golden-image`. No
-attended installer, no console clicks:
+**Prerequisite — drop your SSH public key(s) into `lab/keys/`** so the
+deployed image will accept your login. See
+[`lab/keys/README.md`](lab/keys/README.md). The directory is gitignored
+except for the README, so a fresh clone always starts empty.
+
+```bash
+cp ~/.ssh/id_ed25519.pub lab/keys/$(whoami).pub
+```
+
+Then a single command stages a Debian cloud-init seed, creates the
+Hyper-V VM, runs `prepare-image.sh`, and snapshots the result as
+`golden-image`. No attended installer, no console clicks:
 
 ```bash
 lab/build-fresh-base.sh -f       # -f removes any existing samba-dc1 first
@@ -186,20 +196,31 @@ Under the hood:
 
 1. `lab/stage-samba-base.sh` produces `D:\ISO\debian-13-samba-base.vhdx`
    (one-time Debian generic-cloud → VHDX conversion, ~60 s) plus a
-   per-VM `D:\ISO\samba-dc1-seed.iso` carrying hostname + your SSH key
-   + `debadmin` with passwordless sudo.
+   per-VM `D:\ISO\samba-dc1-seed.iso` carrying hostname, the keys you
+   placed in `lab/keys/`, a `debadmin` user with passwordless sudo, and
+   a documented default password for console-only fallback access.
 2. `lab/hyperv/New-SambaTestVM.ps1` creates a Gen2 VM with a
    differencing VHDX rooted on the base, the seed ISO mounted as DVD,
    MAC pinned to the dnsmasq reservation. Boots, cloud-init applies
    the seed once, the VM is reachable on `10.10.10.20`.
-3. `prepare-image.sh` runs unattended over SSH (~5 minutes).
-4. The VM shuts down and the host takes a `golden-image` checkpoint.
+3. `prepare-image.sh` runs unattended over SSH (~5 minutes), then
+   reboots; `samba-firstboot` detects the hypervisor and installs
+   matching guest-agent packages offline.
+4. Two checkpoints land on `samba-dc1`:
+   - `deploy-master` — host-agnostic, intended for export and
+     redistribution (see [`docs/RELEASE.md`](docs/RELEASE.md)).
+   - `golden-image` — Hyper-V tailored, used by the test scenarios.
 
 Verify reachability after the build:
 
 ```bash
 ssh -J nmadmin@server debadmin@10.10.10.20 'sudo -n true && echo OK'
 ```
+
+When deployed elsewhere, the appliance presents a console-side text
+menu first (network status, password change, SSH-key paste, halt/reboot)
+and only opens the whiptail TUI once the operator picks `[I]nteractive`.
+See the "First boot" section in [`docs/RELEASE.md`](docs/RELEASE.md).
 
 ## Running Tests
 

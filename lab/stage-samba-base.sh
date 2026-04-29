@@ -27,12 +27,16 @@ set -euo pipefail
 HOSTNAME='samba-dc1'
 DOMAIN='lab.test'
 USERNAME='debadmin'
-SSH_PUBKEY_FILE="$HOME/.ssh/id_ed25519.pub"
 STAGE_DIR='/Volumes/ISO'
 DEBIAN_URL='https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SEED_SRC="$SCRIPT_DIR/templates/cloud-init"
+KEYS_DIR="$SCRIPT_DIR/keys"
+
+# Single-pubkey legacy override; if -k FILE is passed we ignore $KEYS_DIR.
+SSH_PUBKEY_FILE=""
+ALLOW_NO_KEYS=0
 
 die() { echo "error: $*" >&2; exit 1; }
 
@@ -44,21 +48,29 @@ Options:
   -n, --hostname NAME     VM short hostname (default: $HOSTNAME)
   -d, --domain NAME       DNS domain (default: $DOMAIN)
   -u, --user NAME         appliance admin user (default: $USERNAME)
-  -k, --pubkey FILE       SSH public key (default: ~/.ssh/id_ed25519.pub)
+  -k, --pubkey FILE       Single SSH pubkey file (legacy; overrides
+                          lab/keys/ if used).
+      --allow-no-keys     Build a master with no SSH keys (console-only
+                          login via the wizard's [P]assword action).
   -s, --stage-dir DIR     output directory (default: $STAGE_DIR)
   -h, --help              show this
+
+Default key source is lab/keys/*.pub. Drop your team's pubkey files
+there; one '      - <key>' line is generated per file. See
+lab/keys/README.md for details.
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        -n|--hostname)   HOSTNAME="$2";        shift 2 ;;
-        -d|--domain)     DOMAIN="$2";          shift 2 ;;
-        -u|--user)       USERNAME="$2";        shift 2 ;;
-        -k|--pubkey)     SSH_PUBKEY_FILE="$2"; shift 2 ;;
-        -s|--stage-dir)  STAGE_DIR="$2";       shift 2 ;;
-        -h|--help)       usage; exit 0 ;;
-        *)               die "unknown arg: $1" ;;
+        -n|--hostname)    HOSTNAME="$2";        shift 2 ;;
+        -d|--domain)      DOMAIN="$2";          shift 2 ;;
+        -u|--user)        USERNAME="$2";        shift 2 ;;
+        -k|--pubkey)      SSH_PUBKEY_FILE="$2"; shift 2 ;;
+        --allow-no-keys)  ALLOW_NO_KEYS=1;      shift ;;
+        -s|--stage-dir)   STAGE_DIR="$2";       shift 2 ;;
+        -h|--help)        usage; exit 0 ;;
+        *)                die "unknown arg: $1" ;;
     esac
 done
 
@@ -66,20 +78,50 @@ command -v qemu-img >/dev/null || die "qemu-img not on PATH (brew install qemu)"
 command -v hdiutil  >/dev/null || die "hdiutil missing (built-in on macOS)"
 command -v curl     >/dev/null || die "curl not on PATH"
 [[ -d "$STAGE_DIR" ]]              || die "stage dir not mounted: $STAGE_DIR"
-[[ -f "$SSH_PUBKEY_FILE" ]]        || die "ssh pubkey not found: $SSH_PUBKEY_FILE"
 [[ -d "$SEED_SRC" ]]               || die "seed templates dir not found: $SEED_SRC"
 for tpl in user-data-samba.tpl meta-data.tpl network-config.tpl; do
     [[ -f "$SEED_SRC/$tpl" ]] || die "template missing: $SEED_SRC/$tpl"
 done
 
 FQDN="${HOSTNAME}.${DOMAIN}"
-PUBKEY_CONTENT="$(tr -d '\n' < "$SSH_PUBKEY_FILE")"
+
+# Build the multi-line ssh_authorized_keys block. Each pubkey line
+# becomes a YAML list entry indented to match user-data-samba.tpl's
+# six-space indent.
+SSH_KEYS_BLOCK=""
+KEY_SOURCES=""
+add_key_line() {
+    local raw="$1"
+    [[ -z "$raw" || "$raw" =~ ^# ]] && return
+    SSH_KEYS_BLOCK+="      - ${raw}"$'\n'
+}
+if [[ -n "$SSH_PUBKEY_FILE" ]]; then
+    [[ -f "$SSH_PUBKEY_FILE" ]] || die "ssh pubkey not found: $SSH_PUBKEY_FILE"
+    while IFS= read -r line; do add_key_line "$line"; done < "$SSH_PUBKEY_FILE"
+    KEY_SOURCES="$SSH_PUBKEY_FILE"
+elif [[ -d "$KEYS_DIR" ]]; then
+    shopt -s nullglob
+    for f in "$KEYS_DIR"/*.pub; do
+        while IFS= read -r line; do add_key_line "$line"; done < "$f"
+        KEY_SOURCES+="$f "
+    done
+    shopt -u nullglob
+fi
+if [[ -z "$SSH_KEYS_BLOCK" ]]; then
+    if [[ $ALLOW_NO_KEYS -eq 1 ]]; then
+        # Empty block — cloud-init renders 'ssh_authorized_keys:' with no
+        # entries, which is valid YAML and means "no keys".
+        :
+    else
+        die "no SSH pubkeys (drop *.pub files in $KEYS_DIR, or pass -k FILE, or --allow-no-keys)"
+    fi
+fi
 
 echo "=== stage-samba-base.sh"
 echo "  hostname:   $HOSTNAME"
 echo "  fqdn:       $FQDN"
 echo "  user:       $USERNAME"
-echo "  pubkey:     $SSH_PUBKEY_FILE"
+echo "  pubkeys:    ${KEY_SOURCES:-<none — --allow-no-keys>}"
 echo "  stage dir:  $STAGE_DIR"
 
 #---- 1. base VHDX (shared across all Samba VMs) ----
@@ -119,11 +161,21 @@ substitute() {
         -e "s|@@FQDN@@|$FQDN|g" \
         -e "s|@@DOMAIN@@|$DOMAIN|g" \
         -e "s|@@USERNAME@@|$USERNAME|g" \
-        -e "s|@@SSH_PUBKEY@@|$PUBKEY_CONTENT|g" \
         "$1"
 }
 
-substitute "$SEED_SRC/user-data-samba.tpl"  > "$SEED_BUILD_DIR/user-data"
+# user-data-samba.tpl has a multi-line @@SSH_KEYS_BLOCK@@ placeholder
+# that sed can't insert multi-line content for cleanly. awk handles the
+# placeholder line first, then sed substitutes the single-token vars.
+SSH_KEYS_BLOCK="$SSH_KEYS_BLOCK" \
+awk '
+    /^[[:space:]]*@@SSH_KEYS_BLOCK@@[[:space:]]*$/ {
+        printf "%s", ENVIRON["SSH_KEYS_BLOCK"]
+        next
+    }
+    { print }
+' "$SEED_SRC/user-data-samba.tpl" | substitute /dev/stdin > "$SEED_BUILD_DIR/user-data"
+
 substitute "$SEED_SRC/meta-data.tpl"        > "$SEED_BUILD_DIR/meta-data"
 substitute "$SEED_SRC/network-config.tpl"   > "$SEED_BUILD_DIR/network-config"
 
