@@ -84,6 +84,25 @@ resolve_dc_ip() {
 #   Input:  $1 = DC hostname or IP
 #   Stdout: one of 2003, 2008, 2008_R2, 2012, 2012_R2, 2016
 #   Return: 0 on success, 1 on query failure (stdout still prints 2008_R2)
+# Take exclusive ownership of /etc/resolv.conf. systemd-resolved (the
+# pre-provision DNS path on the appliance) manages /etc/resolv.conf as a
+# symlink to its own stub file and rewrites that target on its own
+# schedule. Manual writes during join/provision get silently clobbered
+# and Samba ends up using stale DNS — symptoms range from
+# WERR_NO_LOGON_SERVERS during initial replication to broken Kerberos
+# right after a successful join.
+#
+# Call this immediately before any `> /etc/resolv.conf` write in the
+# join/provision path. Idempotent.
+take_over_resolv_conf() {
+    if systemctl is-active systemd-resolved &>/dev/null 2>&1; then
+        systemctl disable --now systemd-resolved >/dev/null 2>&1 || true
+    fi
+    if [[ -L /etc/resolv.conf ]]; then
+        rm -f /etc/resolv.conf
+    fi
+}
+
 probe_forest_fl() {
     local dc="$1"
     local fl_num
@@ -201,6 +220,7 @@ iface ${iface} inet static
     address ${ip}/${mask}
     gateway ${gw}
 NETEOF
+            take_over_resolv_conf
             printf "nameserver %s\n" "$dns" > /etc/resolv.conf
             whiptail --title "Network" --msgbox \
                 "Static pin written:\n  ${ip}/${mask}\n  gw=${gw}  dns=${dns}\n\nEffective on next boot (or systemctl restart networking)." 12 64
@@ -409,6 +429,7 @@ iface ${iface} inet static
     gateway ${new_gw}
 NETEOF
 
+    take_over_resolv_conf
     cat > /etc/resolv.conf << DNSEOF
 nameserver ${new_dns}
 DNSEOF
@@ -751,6 +772,7 @@ post_provision_setup() {
 
     ensure_idmap_config
 
+    take_over_resolv_conf
     cat > /etc/resolv.conf << DNSEOF
 search ${realm_lower}
 nameserver 127.0.0.1
@@ -933,6 +955,7 @@ domain_join_dc() {
     rm -f /etc/samba/smb.conf
     systemctl stop samba-ad-dc 2>/dev/null || true
     write_krb5_conf "$DC_REALM"
+    take_over_resolv_conf
     echo -e "search ${DC_REALM,,}\nnameserver ${dc_ip}" > /etc/resolv.conf
 
     whiptail --infobox "Joining domain at FL=$fl_str... This may take several minutes." 8 60
@@ -979,6 +1002,7 @@ domain_join_rodc() {
     rm -f /etc/samba/smb.conf
     systemctl stop samba-ad-dc 2>/dev/null || true
     write_krb5_conf "$DC_REALM"
+    take_over_resolv_conf
     echo -e "search ${DC_REALM,,}\nnameserver ${dc_ip}" > /etc/resolv.conf
 
     whiptail --infobox "Joining as RODC at FL=$fl_str..." 8 60
@@ -1609,6 +1633,7 @@ cli_join_dc() {
     rm -f /etc/samba/smb.conf
     systemctl stop samba-ad-dc 2>/dev/null || true
     write_krb5_conf "$DC_REALM"
+    take_over_resolv_conf
     echo -e "search ${DC_REALM,,}\nnameserver ${dc_ip}" > /etc/resolv.conf
 
     echo "[sconfig] joining $DC_REALM as $SC_ROLE via $SC_DC ($dc_ip), user=${DC_NETBIOS}\\${DC_ADMIN_USER}, FL=$fl_str..."
