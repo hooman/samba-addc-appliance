@@ -1101,6 +1101,35 @@ esac
 log ""
 printf '%s\n' "$RECS" | tee -a "$LOGFILE"
 
+# Image-freshness check: how stale is this image vs the upstream Debian
+# archive? Useful for deployers who imported an OVA built months ago and
+# want to know whether to apt-get upgrade before putting the DC into
+# production. Skipped silently if no default route (offline environment
+# or DHCP didn't give us one).
+log ""
+log "checking image freshness (apt-get update + upgradable count)..."
+APT_FRESHNESS=""
+# Wait up to 20s for default route to settle (netplan/dhcp may still be
+# negotiating right after the agent install above).
+for _ in $(seq 1 10); do
+    [[ -n "$(ip route show default 2>/dev/null)" ]] && break
+    sleep 2
+done
+if [[ -z "$(ip route show default 2>/dev/null)" ]]; then
+    APT_FRESHNESS="apt: offline (no default route) — freshness check skipped"
+elif apt-get update -qq >>"$LOGFILE" 2>&1; then
+    upg=$(apt list --upgradable 2>/dev/null | grep -cv '^Listing')
+    sec=$(apt list --upgradable 2>/dev/null | grep -c -- '-security')
+    if [[ "$upg" -eq 0 ]]; then
+        APT_FRESHNESS="apt: image is current (0 upgrades pending)"
+    else
+        APT_FRESHNESS="apt: ${upg} upgrades pending (${sec} security-marked); review with 'apt list --upgradable', apply with 'sudo apt-get upgrade'"
+    fi
+else
+    APT_FRESHNESS="apt: index refresh failed — see $LOGFILE"
+fi
+log "  $APT_FRESHNESS"
+
 # Write the motd snippet — visible at every SSH login until removed.
 {
     echo
@@ -1108,6 +1137,9 @@ printf '%s\n' "$RECS" | tee -a "$LOGFILE"
     echo "Detected: $VIRT"
     printf '%s\n' "$INSTALLED_NOTE" | sed 's/^/  /'
     printf '%s\n' "$RECS"
+    echo
+    echo "Image freshness:"
+    echo "  $APT_FRESHNESS"
     echo
     echo "(Remove $MOTD to silence this banner.)"
     echo
@@ -1259,7 +1291,9 @@ config_network() {
 network:
   version: 2
   ethernets:
-    eth0:
+    primary:
+      match:
+        name: "e*"
       dhcp4: true
       dhcp6: false
 NPY
@@ -1277,7 +1311,9 @@ chmod 600 /etc/netplan/60-samba-init.yaml'
 network:
   version: 2
   ethernets:
-    eth0:
+    primary:
+      match:
+        name: \"e*\"
       dhcp4: false
       addresses: [${ipcidr}]
       routes:
@@ -1291,7 +1327,7 @@ chmod 600 /etc/netplan/60-samba-init.yaml"
     esac
     if sudo netplan apply 2>&1 | tee /tmp/netplan.$$; then
         whiptail --title "Network applied" --scrolltext --msgbox \
-            "$(cat /tmp/netplan.$$)\n\nResult:\n$(ip -br addr show eth0)" 18 "$WT_WIDTH"
+            "$(cat /tmp/netplan.$$)\n\nResult:\n$(ip -br addr show)" 18 "$WT_WIDTH"
     else
         whiptail --msgbox "netplan apply reported errors. See /tmp/netplan.$$ — fix and retry." 10 "$WT_WIDTH"
     fi
