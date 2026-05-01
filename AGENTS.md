@@ -5,6 +5,12 @@ repository. It should be safe for Claude Code, Codex, local agents, or other
 tools to read. Vendor-specific notes are explicitly marked and should not be
 treated as general project requirements.
 
+**General conventions, project narrative, and shared decisions live in
+the sibling repo [`../dev-commons/`](../dev-commons/).** Read at least
+[`../dev-commons/CONTEXT.md`](../dev-commons/CONTEXT.md) and
+[`../dev-commons/STYLE.md`](../dev-commons/STYLE.md) before substantive
+work here. This file covers what's specific to `samba-addc-appliance`.
+
 ## Project Purpose
 
 Build and test a Samba Active Directory Domain Controller appliance on Debian
@@ -14,20 +20,20 @@ Build and test a Samba Active Directory Domain Controller appliance on Debian
 - `samba-sconfig.sh`: whiptail TUI plus headless CLI for provision, join,
   hardening, diagnostics, and service maintenance.
 
-The three-repo layout is complete; this repo consumes `lab-kit` and
-`lab-router` as siblings. No compatibility copies remain.
-
-- `lab-kit`: reusable appliance lab orchestration.
-- `lab-router`: simple reusable lab router appliance.
-- `samba-addc-appliance`: this Samba appliance and its Samba-specific tests.
+This repo is one of five siblings under `Debian-SAMBA/` (alongside
+`dev-commons`, `lab-kit`, `lab-router`, and `smb-proxy-appliance`).
+It consumes `lab-kit` and `lab-router` at runtime; see
+[`../dev-commons/REPO-SPLIT.md`](../dev-commons/REPO-SPLIT.md) for the
+full sibling layout, dependency map, and per-repo scope.
 
 Start here if you are new to the environment:
 
+- [`../dev-commons/CONTEXT.md`](../dev-commons/CONTEXT.md) — project narrative
+- [`../dev-commons/STYLE.md`](../dev-commons/STYLE.md) — coding/docs conventions
+- [`../dev-commons/REPO-SPLIT.md`](../dev-commons/REPO-SPLIT.md) — sibling layout
 - `docs/SETUP.md` — Mac + Hyper-V host + ISOs + sibling checkout
 - `README.md` — repo map, lab build procedure, test workflow
-- `docs/REPO-SPLIT.md` — layout and boundaries
 - `docs/LAB-TESTING.md` — scenario model and test plan
-- `docs/AGENTIC-DEVELOPMENT.md` — multi-agent collaboration norms
 
 ## Current Lab Model
 

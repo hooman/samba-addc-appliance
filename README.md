@@ -13,15 +13,18 @@ provision or join a domain.
 | **Deploy** the appliance from a release artifact (`.ova` / `.qcow2` / `.vhdx`) on your hypervisor | [`docs/RELEASE.md`](docs/RELEASE.md) — import recipes per hypervisor, first-boot wizard, day-one configuration |
 | **Build your own master** image, run the test lab, or contribute changes | [`docs/SETUP.md`](docs/SETUP.md) — Mac tools, Hyper-V host, external artifacts, sibling-repo checkout, and the "First-Time Lab Setup" walkthrough below |
 | Understand the **test methodology** | [`docs/LAB-TESTING.md`](docs/LAB-TESTING.md) — scenario runner, existing scenarios, planned coverage |
-| Understand the **three-repo split** | [`docs/REPO-SPLIT.md`](docs/REPO-SPLIT.md) — boundaries between this repo, `lab-kit`, and `lab-router` |
+| Understand the **sibling-repo split** | [`../dev-commons/REPO-SPLIT.md`](../dev-commons/REPO-SPLIT.md) — boundaries between this repo and `dev-commons`, `lab-kit`, `lab-router`, `smb-proxy-appliance` |
+| Look up **shared coding/docs/test conventions** | [`../dev-commons/STYLE.md`](../dev-commons/STYLE.md) |
 
 The appliance is exercised against a Windows Server 2025 forest with
-Microsoft security baseline GPOs applied. The lab is built from three
+Microsoft security baseline GPOs applied. The lab is built from five
 sibling repositories living next to each other on disk:
 
+- [`dev-commons`](../dev-commons/) — cross-cutting docs, templates, tooling
 - [`lab-kit`](../lab-kit/) — reusable appliance lab orchestration
 - [`lab-router`](../lab-router/) — simple reusable lab router VM
 - `samba-addc-appliance` — this Samba appliance and its scenarios
+- [`smb-proxy-appliance`](../smb-proxy-appliance/) — SMB1↔SMB3 proxy appliance (joins this lab as a member server)
 
 The lab exists because most of the important behavior is interoperability
 behavior: Kerberos, LDAP signing, Samba replication, Windows KCC
@@ -40,11 +43,15 @@ expectations, DNS, and SYSVOL handling.
 | `test-results/` | Distilled historical notes, topology, and regression reports. Raw `*.log` transcripts are local-only. |
 | `docs/SETUP.md` | From-scratch development + test environment setup. Read this first. |
 | `docs/LAB-TESTING.md` | Scenario runner model, existing + planned scenarios, useful assertions. |
-| `docs/REPO-SPLIT.md` | Three-repo layout, boundaries, and migration history. |
-| `docs/AGENTIC-DEVELOPMENT.md` | Multi-agent collaboration conventions for this repo. |
-| `AGENTS.md` | Vendor-neutral coding-agent guide for this repo. |
+| `docs/RELEASE.md` | Per-hypervisor import recipes, first-boot wizard, day-one configuration. |
+| `AGENTS.md` | Samba-appliance-specific agent brief. |
 | `CLAUDE.md` | Claude Code compatibility pointer back to `AGENTS.md`. |
 | `HANDOFF.md` | Retired placeholder; points at the maintained docs above. |
+
+Cross-cutting docs (sibling-layout reference, coding conventions,
+multi-agent process, project narrative) live in
+[`../dev-commons/`](../dev-commons/) and are linked from
+[`AGENTS.md`](AGENTS.md).
 
 ## Intended Workflow
 

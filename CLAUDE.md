@@ -15,4 +15,4 @@ Claude-specific interpretation:
 - The old Hyper-V handoff content was retired. Current setup and testing docs
   are in `README.md`, [`docs/SETUP.md`](docs/SETUP.md),
   [`docs/LAB-TESTING.md`](docs/LAB-TESTING.md), and
-  [`docs/REPO-SPLIT.md`](docs/REPO-SPLIT.md).
+  [`../dev-commons/REPO-SPLIT.md`](../dev-commons/REPO-SPLIT.md).
