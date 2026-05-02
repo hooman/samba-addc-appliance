@@ -44,3 +44,11 @@ dist/
 # only tracked file; the *.pub files vary per builder.
 lab/keys/*
 !lab/keys/README.md
+
+# Backend / production credential files must never leave the builder's
+# machine. Defensive entry — samba-addc-appliance doesn't currently
+# carry creds, but the rule is shared across siblings (per
+# dev-commons/STYLE.md §9) so an accidental copy of /etc/samba/secrets.tdb
+# or any *creds* file doesn't slip in.
+*creds*
+!docs/**/*creds*

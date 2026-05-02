@@ -11,3 +11,14 @@ ethernets:
       name: "e*"
     dhcp4: true
     dhcp6: false
+    # Force a MAC-based DHCP client-id instead of systemd-networkd's
+    # default DUID. Without this, dnsmasq sees the DUID as the client-id
+    # and refuses to match the MAC-only `dhcp-host=` reservation in the
+    # lab-router config — handing out a dynamic-pool address instead of
+    # the reserved 10.10.10.20. samba-dc1 currently works only because
+    # dnsmasq happens to remember its prior lease; a fresh
+    # `lab/build-fresh-base.sh -f` rebuild would otherwise hit the same
+    # DHCP-pool-instead-of-reservation bug the proxy hit on its first
+    # build attempt. See dev-commons/audits/2026-05-01-style-compliance.md
+    # finding H1 and dev-commons/STYLE.md §6.
+    dhcp-identifier: mac

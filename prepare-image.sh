@@ -441,7 +441,7 @@ cat > /etc/motd << 'MOTDEOF'
 
   ╔═══════════════════════════════════════════════════════╗
   ║        Samba Active Directory Domain Controller       ║
-  ║              Debian 13 (Trixie) Appliance             ║
+  ║                  Debian 13 (Trixie)                   ║
   ╠═══════════════════════════════════════════════════════╣
   ║  Run 'sudo samba-sconfig' to configure this server.   ║
   ╚═══════════════════════════════════════════════════════╝
@@ -1221,7 +1221,7 @@ log "  effective realm: ${det_effective_domain:-(none)}  AD-DC: ${det_ad_dc:-(no
 # Write the motd snippet — visible at every SSH login until removed.
 {
     echo
-    echo "=== Samba AD DC Appliance: first-boot host integration ==="
+    echo "=== First-boot host detection (Samba AD DC) ==="
     echo "Detected: $VIRT"
     printf '%s\n' "$INSTALLED_NOTE" | sed 's/^/  /'
     printf '%s\n' "$RECS"
@@ -1794,8 +1794,8 @@ cat > /etc/update-motd.d/15-samba-net-status <<'MOTDEOF'
 #!/bin/sh
 DET=/var/lib/samba-init-detected.env
 [ -r "$DET" ] && . "$DET" 2>/dev/null
-printf '\n  Samba AD DC Appliance\n'
-printf '  ---------------------\n'
+printf '\n  Samba Active Directory Domain Controller\n'
+printf '  ----------------------------------------\n'
 printf '  Hostname:    %s\n' "$(hostnamectl hostname 2>/dev/null || hostname)"
 printf '  Network:\n'
 ip -br addr show 2>/dev/null | awk 'NF>0 && $1!="lo" {printf "    %s\n", $0}'

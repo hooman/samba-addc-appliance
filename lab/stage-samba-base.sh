@@ -28,7 +28,8 @@ HOSTNAME='samba-dc1'
 DOMAIN='lab.test'
 USERNAME='debadmin'
 STAGE_DIR='/Volumes/ISO'
-DEBIAN_URL='https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2'
+ARCH='amd64'           # only amd64 implemented today; arm64 expected per dev-commons/CONTEXT.md
+DEBIAN_URL=''           # derived from $ARCH after arg parse
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SEED_SRC="$SCRIPT_DIR/templates/cloud-init"
@@ -53,6 +54,10 @@ Options:
       --allow-no-keys     Build a master with no SSH keys (console-only
                           login via the wizard's [P]assword action).
   -s, --stage-dir DIR     output directory (default: $STAGE_DIR)
+  -a, --arch ARCH         Debian cloud-image architecture (default: $ARCH).
+                          Only 'amd64' is implemented today; 'arm64' is
+                          expected within ~6 months per
+                          dev-commons/CONTEXT.md.
   -h, --help              show this
 
 Default key source is lab/keys/*.pub. Drop your team's pubkey files
@@ -69,10 +74,20 @@ while [[ $# -gt 0 ]]; do
         -k|--pubkey)      SSH_PUBKEY_FILE="$2"; shift 2 ;;
         --allow-no-keys)  ALLOW_NO_KEYS=1;      shift ;;
         -s|--stage-dir)   STAGE_DIR="$2";       shift 2 ;;
+        -a|--arch)        ARCH="$2";            shift 2 ;;
         -h|--help)        usage; exit 0 ;;
         *)                die "unknown arg: $1" ;;
     esac
 done
+
+# Today only amd64 is implemented end-to-end. arm64 will land when the
+# first arm64 appliance does (per dev-commons/SUPPORTED-ENVIRONMENTS.md);
+# the interface accepts it now so call-sites don't need to change.
+case "$ARCH" in
+    amd64) DEBIAN_URL="https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2" ;;
+    arm64) die "arm64 staging not implemented yet — see dev-commons/CONTEXT.md for the timeline" ;;
+    *)     die "unsupported --arch: $ARCH (allowed: amd64, arm64)" ;;
+esac
 
 command -v qemu-img >/dev/null || die "qemu-img not on PATH (brew install qemu)"
 command -v hdiutil  >/dev/null || die "hdiutil missing (built-in on macOS)"
@@ -121,11 +136,12 @@ echo "=== stage-samba-base.sh"
 echo "  hostname:   $HOSTNAME"
 echo "  fqdn:       $FQDN"
 echo "  user:       $USERNAME"
+echo "  arch:       $ARCH"
 echo "  pubkeys:    ${KEY_SOURCES:-<none — --allow-no-keys>}"
 echo "  stage dir:  $STAGE_DIR"
 
 #---- 1. base VHDX (shared across all Samba VMs) ----
-CACHE_QCOW2="$STAGE_DIR/debian-13-genericcloud-amd64.qcow2"
+CACHE_QCOW2="$STAGE_DIR/debian-13-genericcloud-${ARCH}.qcow2"
 OUT_VHDX="$STAGE_DIR/debian-13-samba-base.vhdx"
 
 if [[ ! -f "$OUT_VHDX" ]]; then
